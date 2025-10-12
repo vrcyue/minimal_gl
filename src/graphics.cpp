@@ -83,8 +83,8 @@ static void GraphicsCreateFrameBuffer(
 
 static void GraphicsDeleteComputeTextures(
 ){
-	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex++) {
-		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex++) {
+	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex) {
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
 			GLuint textureId = s_computeTextures[doubleBufferIndex][renderTargetIndex];
 			if (textureId != 0) {
 				glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX + renderTargetIndex);
@@ -124,12 +124,12 @@ static void GraphicsCreateComputeTextures(
 
 	GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(settings->pixelFormat);
 
-	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex++) {
+	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex) {
 		glGenTextures(
 			/* GLsizei n */				NUM_RENDER_TARGETS,
 			/* GLuint * textures */		s_computeTextures[doubleBufferIndex]
 		);
-		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex++) {
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
 			glBindTexture(
 				/* GLenum target */		GL_TEXTURE_2D,
 				/* GLuint texture */	s_computeTextures[doubleBufferIndex][renderTargetIndex]
