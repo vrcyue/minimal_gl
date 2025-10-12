@@ -1,0 +1,55 @@
+プロジェクト概要
+MinimalGL の既存レンダリングパイプラインに Compute Shader のランダムライト機能を安全に統合し、エディタ内とエクスポート後の挙動を一致させながら、既存の MRT/ユーザーテクスチャ資産との互換性を維持する。
+
+改修の最終目標
+- Compute Shader で生成した 4 枚の Render Target をダブルバッファリングし、次フレームの Fragment Shader から参照できるようにする。
+- 解像度変更・ホットリロード・エクスポート済み実行ファイルでも同一の挙動を保証する。
+- 既存の MRT バックバッファやサウンド可視化機能に副作用を出さないようにする。
+
+対象範囲
+- C++ コード: src/graphics.h, src/graphics.cpp, src/app.cpp, src/export_executable.cpp, src/resource/main.cpp などレンダリング／シェーダー管理に関わる箇所。
+- GLSL シェーダー: 新規 Compute Shader サンプルと、ComputeRT を参照する Fragment Shader サンプル。
+- ドキュメント: README とタスク用ドキュメントを Compute 対応に合わせて更新。
+
+既存実装の確認結果
+- MRT バックバッファはテクスチャユニット 0-3 にバインドされ、ユーザーテクスチャは USER_TEXTURE_START_INDEX (=8) から利用している (src/graphics.cpp:15, src/graphics.cpp:604-808)。Compute 用テクスチャはこれらと衝突しないユニット割り当てが必要。
+- レンダー設定や解像度の変更は GraphicsDrawFullScreenQuad 内で検知され、MRT フレームバッファだけ再生成される (src/graphics.cpp:587 付近)。Compute 用のダブルバッファも同じタイミングで再生成しないとリソースが壊れる。
+- シェーダーのホットリロードは AppReloadGraphicsShader (src/app.cpp:1638-1663) が担っているが、Compute Shader に関する処理が存在しない。
+- エクスポート後の実行コード (src/resource/main.cpp:409-626) はエディタと同じ描画フローを再現しているが、Compute パスが無いため挙動が食い違う。
+- サンプル GLSL は layout(location=...) でサンプラーを宣言しているが、C++ 側は layout(binding=...) を前提にテクスチャをバインドしている。両者を揃えないとランタイムで参照に失敗する。
+
+主要なリスクと制約
+- テクスチャユニットの再割り当てにより既存 GLSL を全面更新する必要があり、移行手順の明記が必須。
+- Compute→Fragment の同期は glMemoryBarrier だけでは不足するケースがあるため、必要に応じて glFinish やフェンスを検討する。
+- ホットリロード中に Compute Shader を削除している間に描画が走る競合が発生し得る。排他制御を導入する。
+- エクスポートツールは Shader Minifier を利用しているため、Compute Shader も同じフローに載せる必要がある。
+
+実装ステップ
+1. グローバル状態の拡張
+   - src/graphics.h に Compute Shader のプログラム ID と s_computeTextures[2][NUM_RENDER_TARGETS] を追加。
+   - GraphicsInitialize / GraphicsTerminate / GraphicsClearAllRenderTargets に Compute テクスチャ生成・破棄処理を組み込む。
+
+2. Compute テクスチャ管理の実装
+   - GraphicsCreateComputeTextures / GraphicsDeleteComputeTextures を追加し、GraphicsCreateFrameBuffer と同じピクセルフォーマット分岐を再利用する。
+   - デフォルトでは NEAREST フィルタ、Wrap は CLAMP_TO_EDGE とし、あとでサンプリング時に GraphicsSetTextureSampler を使用できるようにする。
+
+3. Compute Shader ライフサイクル
+   - GraphicsCreateComputeShader / GraphicsDeleteComputeShader を GraphicsCreateFragmentShader と同様に実装し、glFinish を挟んでから破棄する。
+   - GraphicsComputeDispatch を新設し、読み取り用イメージユニット 0-3、書き込み用 4-7 をバインド。ディスパッチ後に glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT) を呼ぶ。
+
+4. 描画パスへの統合
+   - GraphicsUpdate (src/graphics.cpp:1292-1318) で Fragment 描画前に GraphicsComputeDispatch を呼ぶ。
+   - GraphicsDrawFullScreenQuad 内で Compute テクスチャをテクスチャユニット 4-7 にバインドし、既存 MRT は 0-3 に残す。Cleanup でも同じ範囲をアンバインドする。
+
+5. アプリケーション層の更新
+   - src/app.cpp に Compute Shader のファイルパスとソース保管用メンバーを追加し、「Open Compute Shader」メニューとホットリロード処理を実装する。
+   - プロジェクト設定の保存／復元 (JsonGetAs*, cJSON_Add*) に Compute Shader パスを追加する。
+
+6. エクスポート兼ランタイム対応
+   - src/export_executable.cpp で Compute Shader をコピー・Minify する処理を追加。
+   - src/resource/main.cpp に Compute テクスチャ生成、ディスパッチ、テクスチャユニット 4-7 へのバインド処理を追加し、編集環境と同じフローにそろえる。
+
+7. GLSL / ドキュメント更新
+   - 新しいテクスチャユニット割り当て（MRT: binding=0-3、ComputeRT: binding=4-7、ユーザーテクスチャ: binding>=8）を README とサンプルシェーダーに明記。
+   - Compute サンプル (	est_compute_random_write.compute.glsl, 	est_compute_read.gfx.glsl) を binding 指定に合わせて修正し、説明コメントを追加。
+

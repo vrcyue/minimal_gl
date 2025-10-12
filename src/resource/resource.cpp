@@ -33,6 +33,8 @@ char g_concatenatedString_align0[] =
 #endif
 	"glDispatchCompute\0"			/* 頻出ワードを持たないので先に配置 */
 	"glUniform1i\0"					/* 頻出ワードを持たないので先に配置 */
+	"glBindImageTexture\0"			/* 頻出ワードを持たないので先に配置 */
+	"glMemoryBarrier\0"				/* 頻出ワードを持たないので先に配置 */
 #if ENABLE_MIPMAP_GENERATION
 	"glGenerateMipmap\0"			/* 既出ワードを持たないので先に配置 */
 #endif
@@ -70,6 +72,10 @@ char g_concatenatedString_align0[] =
 	#include "graphics_fragment_shader.inl"
 	"\0"			/* end mark */
 
+	/* コンピュート用シェーダ */
+	#include "graphics_compute_shader.inl"
+	"\0"			/* end mark */
+
 	/* サウンド用シェーダ */
 	#include "sound_compute_shader.inl"
 ;
@@ -81,6 +87,8 @@ typedef enum {
 #endif
 	GlExtDispatchCompute,
 	GlExtUniform1i,
+	GlExtBindImageTexture,
+	GlExtMemoryBarrier,
 #if ENABLE_MIPMAP_GENERATION
 	GlExtGenerateMipmap,
 #endif
@@ -119,6 +127,8 @@ typedef enum {
 #define wglSwapIntervalEXT			((BOOL(WINAPI*)(int))           s_glExtFunctions[kWglSwapIntervalEXT])
 #define glExtDispatchCompute		((PFNGLDISPATCHCOMPUTEPROC)     s_glExtFunctions[GlExtDispatchCompute])
 #define glExtUniform1i				((PFNGLUNIFORM1IPROC)           s_glExtFunctions[GlExtUniform1i])
+#define glExtBindImageTexture		((PFNGLBINDIMAGETEXTUREPROC)   s_glExtFunctions[GlExtBindImageTexture])
+#define glExtMemoryBarrier		((PFNGLMEMORYBARRIERPROC)        s_glExtFunctions[GlExtMemoryBarrier])
 #define glExtGenerateMipmap			((PFNGLGENERATEMIPMAPPROC)      s_glExtFunctions[GlExtGenerateMipmap])
 #define glExtCreateShaderProgramv	((PFNGLCREATESHADERPROGRAMVPROC)s_glExtFunctions[GlExtCreateShaderProgramv])
 #define glExtUseProgram				((PFNGLUSEPROGRAMPROC)          s_glExtFunctions[GlExtUseProgram])

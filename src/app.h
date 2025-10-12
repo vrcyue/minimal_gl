@@ -405,11 +405,17 @@ void AppGetDefaultDirectoryName(char *directoryName, size_t directoryNameSizeInB
 /* デフォルトグラフィクスシェーダファイルを開く */
 bool AppOpenDefaultGraphicsShader();
 
+/* デフォルトコンピュートシェーダファイルを開く */
+bool AppOpenDefaultComputeShader();
+
 /* デフォルトサウンドシェーダファイルを開く */
 bool AppOpenDefaultSoundShader();
 
 /* グラフィクスシェーダファイルを開く */
 bool AppOpenGraphicsShaderFile(const char *fileName);
+
+/* コンピュートシェーダファイルを開く */
+bool AppOpenComputeShaderFile(const char *fileName);
 
 /* サウンドシェーダファイルを開く */
 bool AppOpenSoundShaderFile(const char *fileName);
@@ -420,11 +426,17 @@ bool AppOpenDragAndDroppedFile(const char *fileName);
 /* 現在開かれているグラフィクスシェーダファイル名の取得 */
 const char *AppGetCurrentGraphicsShaderFileName();
 
+/* 現在開かれているコンピュートシェーダファイル名の取得 */
+const char *AppGetCurrentComputeShaderFileName();
+
 /* 現在開かれているサウンドシェーダファイル名の取得 */
 const char *AppGetCurrentSoundShaderFileName();
 
 /* 現在のグラフィクスシェーダコードのポインタを取得 */
 const char *AppGetCurrentGraphicsShaderCode();
+
+/* 現在のコンピュートシェーダコードのポインタを取得 */
+const char *AppGetCurrentComputeShaderCode();
 
 /* 現在のサウンドシェーダコードのポインタを取得 */
 const char *AppGetCurrentSoundShaderCode();

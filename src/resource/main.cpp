@@ -24,6 +24,8 @@
 #define ASSUMED_MRT_TEXTURE(frameBufferIndex, renderTargetIndex)	((frameBufferIndex) + (renderTargetIndex) * 2 + 1)
 #define AVOID_GL_RUNTIME_ERROR_AND_START_FROM_ZERO_FRAME			1
 
+#define COMPUTE_TEXTURE_START_INDEX					(4)
+
 /* サウンドレンダリング先バッファの番号 */
 #define BUFFER_INDEX_FOR_SOUND_OUTPUT			0
 
@@ -48,6 +50,10 @@ static void *s_glExtFunctions[NUM_GLEXT_FUNCTIONS];
 /*=============================================================================
 ▼	各種構造体
 -----------------------------------------------------------------------------*/
+static GLuint s_graphicsComputeTextures[2][NUM_RENDER_TARGETS] = {{0}};
+static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
+static GLuint s_graphicsComputeProgramId = 0;
+
 #pragma data_seg(".s_waveFormat")
 static /* const */ WAVEFORMATEX s_waveFormat = {
 	/* WORD  wFormatTag */		WAVE_FORMAT_IEEE_FLOAT,
@@ -331,14 +337,22 @@ entrypoint(
 	}
 
 	/* フラグメントシェーダのポインタ配列 */
-	const char *graphicsShaderCode = p;
-	const char *graphicsShaderCodes[] = {graphicsShaderCode};
+	const char *graphicsFragmentShaderCode = p;
+	const char *graphicsFragmentShaderCodes[] = {graphicsFragmentShaderCode};
 
 	/* コンピュートシェーダコードの開始位置を検索 */
 	while (*p != '\0') { p++; }
 	p++;
 
-	/* コンピュートシェーダのポインタ配列 */
+	/* グラフィクス用コンピュートシェーダのポインタ配列 */
+	const char *graphicsComputeShaderCode = p;
+	const char *graphicsComputeShaderCodes[] = {graphicsComputeShaderCode};
+
+	/* サウンド用コンピュートシェーダコードの開始位置を検索 */
+	while (*p != '\0') { p++; }
+	p++;
+
+	/* サウンド用コンピュートシェーダのポインタ配列 */
 	const char *soundShaderCode = p;
 	const char *soundShaderCodes[] = {soundShaderCode};
 
@@ -405,17 +419,93 @@ entrypoint(
 #endif
 	}
 
+	/* グラフィクス用コンピュートシェーダの作成 */
+	s_graphicsComputeProgramId = glExtCreateShaderProgramv(
+		/* GLenum type */		GL_COMPUTE_SHADER,
+		/* GLsizei count */		1,
+		/* const GLchar* const *strings */	graphicsComputeShaderCodes
+	);
+	glExtGetProgramiv(
+		/* GLuint program */		s_graphicsComputeProgramId,
+		/* GLenum pname */		GL_COMPUTE_WORK_GROUP_SIZE,
+		/* GLint *params */		s_graphicsComputeWorkGroupSize
+	);
+	for (int i = 0; i < 3; ++i) {
+		if (s_graphicsComputeWorkGroupSize[i] <= 0) {
+			s_graphicsComputeWorkGroupSize[i] = 1;
+		}
+	}
+
+	/* グラフィクス用コンピュートテクスチャの作成 */
+	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex) {
+		glGenTextures(
+			/* GLsizei n */		NUM_RENDER_TARGETS,
+			/* GLuint * textures */		s_graphicsComputeTextures[doubleBufferIndex]
+		);
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
+			glBindTexture(
+				/* GLenum target */		GL_TEXTURE_2D,
+				/* GLuint texture */		s_graphicsComputeTextures[doubleBufferIndex][renderTargetIndex]
+			);
+#if PREFER_GL_TEX_STORAGE_2D
+			glExtTexStorage2D(
+				/* GLenum target */		GL_TEXTURE_2D,
+				/* GLsizei levels */		8,
+				/* GLint internalformat */	(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
+					(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
+					(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
+					GL_RGBA8,
+				/* GLsizei width */		SCREEN_WIDTH,
+				/* GLsizei height */	SCREEN_HEIGHT
+			);
+#else
+			glTexImage2D(
+				/* GLenum target */		GL_TEXTURE_2D,
+				/* GLint level */		0,
+				/* GLint internalformat */	(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
+					(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
+					(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
+					GL_RGBA8,
+				/* GLsizei width */		SCREEN_WIDTH,
+				/* GLsizei height */	SCREEN_HEIGHT,
+				/* GLint border */		0,
+				/* GLenum format */		GL_RGBA,
+				/* GLenum type */		(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_UNSIGNED_BYTE:
+					(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_HALF_FLOAT:
+					(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_FLOAT:
+					GL_UNSIGNED_BYTE,
+				/* const void * data */	NULL
+			);
+#endif
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (TEXTURE_FILTER == TEXTURE_FILTER_NEAREST)? GL_NEAREST: GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (TEXTURE_FILTER == TEXTURE_FILTER_NEAREST)? GL_NEAREST: GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (TEXTURE_WRAP == TEXTURE_WRAP_REPEAT)? GL_REPEAT: (TEXTURE_WRAP == TEXTURE_WRAP_MIRRORED_REPEAT)? GL_MIRRORED_REPEAT: GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (TEXTURE_WRAP == TEXTURE_WRAP_REPEAT)? GL_REPEAT: (TEXTURE_WRAP == TEXTURE_WRAP_MIRRORED_REPEAT)? GL_MIRRORED_REPEAT: GL_CLAMP_TO_EDGE);
+		}
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+
 	/* フラグメントシェーダの作成 */
 	int graphicsFsProgramId = glExtCreateShaderProgramv(
 		/* GLenum type */					GL_FRAGMENT_SHADER,
 		/* GLsizei count */					1,
-		/* const GLchar* const *strings */	graphicsShaderCodes
+		/* const GLchar* const *strings */	graphicsFragmentShaderCodes
 	);
 
 	/* フラグメントシェーダのバインド */
 	glExtUseProgram(
 		/* GLuint program */	graphicsFsProgramId
 	);
+
+	/* コンピュートテクスチャをサンプリング用にバインド */
+	if (s_graphicsComputeProgramId != 0) {
+		int computeTextureIndex = (frameCount & 1) ^ 1;
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
+			glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX +  renderTargetIndex);
+			glBindTexture(GL_TEXTURE_2D, s_graphicsComputeTextures[computeTextureIndex][renderTargetIndex]);
+		}
+		glActiveTexture(GL_TEXTURE0);
+	}
 
 #if ENABLE_BACK_BUFFER
 #	if (NUM_RENDER_TARGETS == 1) && (PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)
@@ -524,6 +614,50 @@ entrypoint(
 			/* GLint location */	0,
 			/* GLfloat v0 */		waveOutPos
 		);
+
+	/* グラフィクスコンピュートシェーダのディスパッチ */
+	if (s_graphicsComputeProgramId != 0) {
+		glExtUseProgram(s_graphicsComputeProgramId);
+
+		int readIndex = (frameCount & 1) ^ 1;
+		int writeIndex = (frameCount & 1);
+		GLenum imageFormat = (PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
+			(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
+			(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
+			GL_RGBA8;
+
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
+			glExtBindImageTexture(renderTargetIndex, s_graphicsComputeTextures[readIndex][renderTargetIndex], 0, GL_FALSE, 0, GL_READ_ONLY, imageFormat);
+			glExtBindImageTexture(NUM_RENDER_TARGETS + renderTargetIndex, s_graphicsComputeTextures[writeIndex][renderTargetIndex], 0, GL_FALSE, 0, GL_WRITE_ONLY, imageFormat);
+		}
+
+		float timeInSeconds = (float)waveOutPos / (float)NUM_SOUND_SAMPLES_PER_SEC;
+		glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+		glUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+		glUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
+		glUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+
+		GLuint workGroupSizeX = (GLuint)s_graphicsComputeWorkGroupSize[0];
+		GLuint workGroupSizeY = (GLuint)s_graphicsComputeWorkGroupSize[1];
+		GLuint workGroupSizeZ = (GLuint)s_graphicsComputeWorkGroupSize[2];
+		if (workGroupSizeX == 0) workGroupSizeX = 1;
+		if (workGroupSizeY == 0) workGroupSizeY = 1;
+		if (workGroupSizeZ == 0) workGroupSizeZ = 1;
+
+		GLuint numGroupsX = (GLuint)((SCREEN_WIDTH + workGroupSizeX - 1) / workGroupSizeX);
+		GLuint numGroupsY = (GLuint)((SCREEN_HEIGHT + workGroupSizeY - 1) / workGroupSizeY);
+		GLuint numGroupsZ = 1;
+
+		glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+		glExtMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
+
+		for (int imageUnit = 0; imageUnit < NUM_RENDER_TARGETS * 2; ++imageUnit) {
+			glExtBindImageTexture(imageUnit, 0, 0, GL_FALSE, 0, GL_READ_ONLY, imageFormat);
+		}
+
+		glExtUseProgram(graphicsFsProgramId);
+	}
+
 
 #if ENABLE_FRAME_COUNT_UNIFORM
 		/*
@@ -681,7 +815,15 @@ entrypoint(
 #	endif
 #endif
 
-		/* 画面フリップ */
+			if (s_graphicsComputeProgramId != 0) {
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
+			glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX +  renderTargetIndex);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+		glActiveTexture(GL_TEXTURE0);
+	}
+
+/* 画面フリップ */
 		SwapBuffers(
 			/* HDC  Arg1 */	hDC
 		);
@@ -710,6 +852,14 @@ entrypoint(
 		/* サウンド再生位置が終点に達するまで継続 */
 		s_mmTime.u.sample < NUM_SOUND_BUFFER_AVAILABLE_SAMPLES
 	);
+
+	if (s_graphicsComputeProgramId != 0) {
+		glDeleteProgram(s_graphicsComputeProgramId);
+		s_graphicsComputeProgramId = 0;
+	}
+	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex) {
+		glDeleteTextures(NUM_RENDER_TARGETS, s_graphicsComputeTextures[doubleBufferIndex]);
+	}
 
 	/* デモを終了する */
 	ExitProcess(

@@ -142,6 +142,9 @@ MinimalGL を使った PC 4K Intro 作成の簡単な流れは以下のように
 - LDR/HDR レンダリング  
 	LDR (Unorm8 RGBA) および HDR (FP16 FP32 RGBA) でのレンダリングに対応します。
 
+- コンピュートシェーダ  
+	グラフィクスパイプラインに Compute Shader を統合しています。binding=0〜3 は従来通り MRT/バックバッファ、binding=4〜7 は Compute Shader の書き込み結果、binding>=8 はユーザーテクスチャとして扱われます。Compute Shader で生成した結果は次フレームのフラグメントシェーダから sampler2D で参照できます。
+
 
 # twigl のシェーダの実行ファイル化
 

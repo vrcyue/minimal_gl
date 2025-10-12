@@ -297,6 +297,30 @@ static LRESULT CALLBACK MainWndProc(
 					return 0;
 				} break;
 
+				/* コンピュートシェーダソースのオープン */
+				case IDM_OPEN_COMPUTE_SHADER: {
+					if (s_fullScreen) {
+						ToggleFullScreen();
+					} else {
+						char fileName[MAX_PATH] = {0};
+						OPENFILENAME ofn = {0};
+						ofn.lStructSize = sizeof(OPENFILENAME);
+						ofn.hwndOwner = NULL;
+						ofn.lpstrFilter =
+							"Compute shader file (*.cmp.glsl;*.compute.glsl)\0*.cmp.glsl;*.compute.glsl\0"
+							"All files (*.*)\0*.*\0"
+							"\0";
+						ofn.lpstrFile = fileName;
+						ofn.nMaxFile = sizeof(fileName);
+						ofn.lpstrTitle = (LPSTR)"Open compute shader file";
+
+						if (GetOpenFileName(&ofn)) {
+							AppOpenComputeShaderFile(fileName);
+						}
+					}
+					return 0;
+				} break;
+
 				/* スクリーンショット保存 */
 				case IDM_CAPTURE_SCREEN_SHOT: {
 					if (s_fullScreen) {
@@ -497,6 +521,11 @@ static LRESULT CALLBACK MainWndProc(
 				/* デフォルトグラフィクスシェーダの読み込み */
 				case IDM_LOAD_DEFAULT_GRAPHICS_SHADER: {
 					AppOpenDefaultGraphicsShader();
+				} break;
+
+				/* デフォルトコンピュートシェーダの読み込み */
+				case IDM_LOAD_DEFAULT_COMPUTE_SHADER: {
+					AppOpenDefaultComputeShader();
 				} break;
 
 				/* デフォルトサウンドシェーダの読み込み */

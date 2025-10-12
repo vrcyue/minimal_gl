@@ -149,6 +149,11 @@ static char *s_graphicsShaderCode = NULL;
 static struct stat s_graphicsShaderFileStat;
 static bool s_graphicsCreateShaderSucceeded = false;
 
+static char s_computeShaderFileName[MAX_PATH] = "";
+static char *s_computeShaderCode = NULL;
+static struct stat s_computeShaderFileStat;
+static bool s_computeCreateShaderSucceeded = false;
+
 static const char s_defaultGraphicsShaderCode[] =
 	"#version 430\n"
 
@@ -223,6 +228,38 @@ static const char s_defaultGraphicsShaderCode[] =
 	"	);\n"
 	"}\n"
 ;
+static const char s_defaultComputeShaderCode[] =
+	"#version 430\n"
+	"layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;\n"
+	"\n"
+	"layout(rgba32f, binding = 0) uniform readonly image2D g_prevCompute0;\n"
+	"layout(rgba32f, binding = 1) uniform readonly image2D g_prevCompute1;\n"
+	"layout(rgba32f, binding = 2) uniform readonly image2D g_prevCompute2;\n"
+	"layout(rgba32f, binding = 3) uniform readonly image2D g_prevCompute3;\n"
+	"\n"
+	"layout(rgba32f, binding = 4) uniform writeonly image2D g_currCompute0;\n"
+	"layout(rgba32f, binding = 5) uniform writeonly image2D g_currCompute1;\n"
+	"layout(rgba32f, binding = 6) uniform writeonly image2D g_currCompute2;\n"
+	"layout(rgba32f, binding = 7) uniform writeonly image2D g_currCompute3;\n"
+	"\n"
+	"void main(){\n"
+	"	ivec2 coord = ivec2(gl_GlobalInvocationID.xy);\n"
+	"	ivec2 size = imageSize(g_currCompute0);\n"
+	"	if (coord.x >= size.x || coord.y >= size.y) {\n"
+	"		return;\n"
+	"	}\n"
+	"\n"
+	"	vec4 prev0 = imageLoad(g_prevCompute0, coord);\n"
+	"	vec4 prev1 = imageLoad(g_prevCompute1, coord);\n"
+	"	vec4 prev2 = imageLoad(g_prevCompute2, coord);\n"
+	"	vec4 prev3 = imageLoad(g_prevCompute3, coord);\n"
+	"\n"
+	"	imageStore(g_currCompute0, coord, prev0);\n"
+	"	imageStore(g_currCompute1, coord, prev1);\n"
+	"	imageStore(g_currCompute2, coord, prev2);\n"
+	"	imageStore(g_currCompute3, coord, prev3);\n"
+	"}\n"
+;
 static const char s_defaultSoundShaderCode[] =
 	"#version 430\n"
 	"layout(location=" TO_STRING(UNIFORM_LOCATION_WAVE_OUT_POS) ")uniform int g_waveOutPos;\n"
@@ -287,6 +324,12 @@ void AppUpdateWindowTitleBar(){
 	if (strcmp(s_graphicsShaderFileName, "") != 0) {
 		char fileName[MAX_PATH] = {0};
 		SplitFileNameFromFilePath(fileName, sizeof(fileName), s_graphicsShaderFileName);
+		strncat_s(title, sizeof(title), fileName, _TRUNCATE);
+		strncat_s(title, sizeof(title), "        ", _TRUNCATE);
+	}
+	if (strcmp(s_computeShaderFileName, "") != 0) {
+		char fileName[MAX_PATH] = {0};
+		SplitFileNameFromFilePath(fileName, sizeof(fileName), s_computeShaderFileName);
 		strncat_s(title, sizeof(title), fileName, _TRUNCATE);
 		strncat_s(title, sizeof(title), "        ", _TRUNCATE);
 	}
@@ -675,7 +718,7 @@ bool AppCaptureScreenShotGetForceReplaceAlphaByOneFlag(){
 	return s_captureScreenShotSettings.replaceAlphaByOne;
 }
 void AppCaptureScreenShot(){
-	if (s_graphicsCreateShaderSucceeded) {
+	if (s_graphicsCreateShaderSucceeded && s_computeCreateShaderSucceeded) {
 		if (DialogConfirmOverWrite(s_captureScreenShotSettings.fileName) == DialogConfirmOverWriteResult_Yes) {
 			CurrentFrameParams params = {0};
 			params.waveOutPos				= SoundGetWaveOutPos();
@@ -711,7 +754,7 @@ void AppCaptureScreenShot(){
 			}
 		}
 	} else {
-		AppErrorMessageBox(APP_NAME, "Invalid graphics shader.");
+		AppErrorMessageBox(APP_NAME, "Invalid graphics or compute shader.");
 	}
 }
 
@@ -735,7 +778,7 @@ int AppCaptureCubemapGetResolution(){
 	return s_captureCubemapSettings.reso;
 }
 void AppCaptureCubemap(){
-	if (s_graphicsCreateShaderSucceeded) {
+	if (s_graphicsCreateShaderSucceeded && s_computeCreateShaderSucceeded) {
 		if (DialogConfirmOverWrite(s_captureCubemapSettings.fileName) == DialogConfirmOverWriteResult_Yes) {
 			CurrentFrameParams params = {0};
 			params.waveOutPos				= SoundGetWaveOutPos();
@@ -762,7 +805,7 @@ void AppCaptureCubemap(){
 			}
 		}
 	} else {
-		AppErrorMessageBox(APP_NAME, "Invalid graphics shader.");
+		AppErrorMessageBox(APP_NAME, "Invalid graphics or compute shader.");
 	}
 }
 
@@ -914,9 +957,11 @@ void AppExportExecutable(){
 	printf("export an executable file.\n");
 	if (s_soundCreateShaderSucceeded
 	&&	s_graphicsCreateShaderSucceeded
+	&&	s_computeCreateShaderSucceeded
 	) {
 		(void) ExportExecutable(
 			s_graphicsShaderCode,
+			s_computeShaderCode,
 			s_soundShaderCode,
 			&s_renderSettings,
 			&s_executableExportSettings
@@ -975,6 +1020,7 @@ void AppRecordImageSequence(){
 	printf("record image sequence.\n");
 	if (s_soundCreateShaderSucceeded
 	&&	s_graphicsCreateShaderSucceeded
+	&&	s_computeCreateShaderSucceeded
 	) {
 		(void) RecordImageSequence(
 			&s_renderSettings,
@@ -1080,9 +1126,11 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 
 	{
 		char graphicsShaderRelativeFileName[MAX_PATH] = {0};
+		char computeShaderRelativeFileName[MAX_PATH] = {0};
 		char soundShaderRelativeFileName[MAX_PATH] = {0};
 
 		JsonGetAsString(jsonRoot, "/app/graphicsShaderFileName", graphicsShaderRelativeFileName, sizeof(graphicsShaderRelativeFileName), "");
+		JsonGetAsString(jsonRoot, "/app/computeShaderFileName",  computeShaderRelativeFileName,  sizeof(computeShaderRelativeFileName),  "");
 		JsonGetAsString(jsonRoot, "/app/soundShaderFileName",    soundShaderRelativeFileName,    sizeof(soundShaderRelativeFileName),    "");
 		JsonGetAsInt   (jsonRoot, "/app/xReso",                 &s_xReso, DEFAULT_SCREEN_XRESO);
 		JsonGetAsInt   (jsonRoot, "/app/yReso",                 &s_yReso, DEFAULT_SCREEN_YRESO);
@@ -1101,6 +1149,25 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 				AppErrorMessageBox(APP_NAME, "Failed to load graphics shader %s.", s_graphicsShaderFileName);
 				AppOpenDefaultGraphicsShader();
 				result = false;
+			}
+		}
+
+		if (strcmp(computeShaderRelativeFileName, "") == 0) {
+			s_computeShaderFileName[0] = '\0';
+			AppOpenDefaultComputeShader();
+		} else {
+			GenerateCombinedPath(
+				/* char *combinedPath */				s_computeShaderFileName,
+				/* size_t combinedPathSizeInBytes */	sizeof(s_computeShaderFileName),
+				/* const char *directoryPath */			projectBasePath,
+				/* const char *filePath */				computeShaderRelativeFileName
+			);
+			if (IsValidFileName(s_computeShaderFileName) == false) {
+				AppErrorMessageBox(APP_NAME, "Failed to load compute shader %s.", s_computeShaderFileName);
+				AppOpenDefaultComputeShader();
+				result = false;
+			} else {
+				s_computeShaderFileStat.st_mtime = 0;
 			}
 		}
 
@@ -1292,12 +1359,21 @@ static void AppProjectSerializeToJson(cJSON *jsonRoot, const char *projectBasePa
 		cJSON *jsonApp = cJSON_AddObjectToObject(jsonRoot, "app");
 
 		char graphicsShaderRelativeFileName[MAX_PATH] = {0};
+		char computeShaderRelativeFileName[MAX_PATH] = {0};
 		if (strcmp(s_graphicsShaderFileName, "") != 0) {
 			GenerateRelativePathFromDirectoryToFile(
 				/* char *relativePath */				graphicsShaderRelativeFileName,
 				/* size_t relativePathSizeInBytes */	sizeof(graphicsShaderRelativeFileName),
 				/* const char *fromDirectoryPath */		projectBasePath,
 				/* const char *toFilePath */			s_graphicsShaderFileName
+			);
+		}
+		if (strcmp(s_computeShaderFileName, "") != 0) {
+			GenerateRelativePathFromDirectoryToFile(
+				/* char *relativePath */				computeShaderRelativeFileName,
+				/* size_t relativePathSizeInBytes */	sizeof(computeShaderRelativeFileName),
+				/* const char *fromDirectoryPath */		projectBasePath,
+				/* const char *toFilePath */			s_computeShaderFileName
 			);
 		}
 		char soundShaderRelativeFileName[MAX_PATH] = {0};
@@ -1311,6 +1387,7 @@ static void AppProjectSerializeToJson(cJSON *jsonRoot, const char *projectBasePa
 		}
 
 		cJSON_AddStringToObject(jsonApp, "graphicsShaderFileName" , graphicsShaderRelativeFileName);
+		cJSON_AddStringToObject(jsonApp, "computeShaderFileName"  , computeShaderRelativeFileName);
 		cJSON_AddStringToObject(jsonApp, "soundShaderFileName"    , soundShaderRelativeFileName);
 		cJSON_AddNumberToObject(jsonApp, "xReso"                  , s_xReso);
 		cJSON_AddNumberToObject(jsonApp, "yReso"                  , s_yReso);
@@ -1643,6 +1720,19 @@ static bool AppReloadGraphicsShader(){
 	return s_graphicsCreateShaderSucceeded;
 }
 
+static bool AppReloadComputeShader(){
+	GraphicsDeleteComputeShader();
+	if (s_computeShaderCode == NULL) {
+		s_computeCreateShaderSucceeded = false;
+		return false;
+	}
+	s_computeCreateShaderSucceeded = GraphicsCreateComputeShader(s_computeShaderCode);
+	if (s_preferenceSettings.enableAutoRestartByGraphicsShader) {
+		AppRestart();
+	}
+	return s_computeCreateShaderSucceeded;
+}
+
 static bool AppReloadSoundShader(){
 	/*
 		シェーダリロード時のサウンド周りのリセットは厄介な問題。
@@ -1677,6 +1767,10 @@ void AppGetDefaultDirectoryName(char *directoryName, size_t directoryNameSizeInB
 		SplitDirectoryPathFromFilePath(directoryName, directoryNameSizeInBytes, s_graphicsShaderFileName);
 		return;
 	}
+	if (strcmp(s_computeShaderFileName, "") != 0) {
+		SplitDirectoryPathFromFilePath(directoryName, directoryNameSizeInBytes, s_computeShaderFileName);
+		return;
+	}
 	if (strcmp(s_soundShaderFileName, "") != 0) {
 		SplitDirectoryPathFromFilePath(directoryName, directoryNameSizeInBytes, s_soundShaderFileName);
 		return;
@@ -1691,6 +1785,13 @@ bool AppOpenDefaultGraphicsShader(){
 	if (s_graphicsShaderCode != NULL) free(s_graphicsShaderCode);
 	s_graphicsShaderCode = MallocCopyString(s_defaultGraphicsShaderCode);
 	return AppReloadGraphicsShader();
+}
+
+bool AppOpenDefaultComputeShader(){
+	memset(s_computeShaderFileName, 0, sizeof(s_computeShaderFileName));
+	if (s_computeShaderCode != NULL) free(s_computeShaderCode);
+	s_computeShaderCode = MallocCopyString(s_defaultComputeShaderCode);
+	return AppReloadComputeShader();
 }
 
 bool AppOpenDefaultSoundShader(){
@@ -1710,6 +1811,19 @@ bool AppOpenGraphicsShaderFile(const char *fileName){
 	strcpy_s(s_graphicsShaderFileName, sizeof(s_graphicsShaderFileName), fileName);
 	AppUpdateWindowTitleBar();
 	s_graphicsShaderFileStat.st_mtime = 0;	/* 強制的に再読み込み */
+
+	return true;
+}
+bool AppOpenComputeShaderFile(const char *fileName){
+	if (IsValidFileName(fileName) == false) {
+		AppErrorMessageBox(APP_NAME, "Invalid file name %s.", fileName);
+		return false;
+	}
+
+	printf("open a compute shader file %s.\n", fileName);
+	strcpy_s(s_computeShaderFileName, sizeof(s_computeShaderFileName), fileName);
+	AppUpdateWindowTitleBar();
+	s_computeShaderFileStat.st_mtime = 0;	/* 強制的に再読み込み */
 
 	return true;
 }
@@ -1736,6 +1850,11 @@ bool AppOpenDragAndDroppedFile(const char *fileName){
 	if (IsSuffix(fileName, ".gfx.glsl")) {
 		return AppOpenGraphicsShaderFile(fileName);
 	} else
+	if (IsSuffix(fileName, ".cmp.glsl")
+	||	IsSuffix(fileName, ".compute.glsl")
+	) {
+		return AppOpenComputeShaderFile(fileName);
+	} else
 	if (IsSuffix(fileName, ".snd.glsl")) {
 		return AppOpenSoundShaderFile(fileName);
 	} else
@@ -1759,11 +1878,17 @@ bool AppOpenDragAndDroppedFile(const char *fileName){
 const char *AppGetCurrentGraphicsShaderFileName(){
 	return s_graphicsShaderFileName;
 }
+const char *AppGetCurrentComputeShaderFileName(){
+	return s_computeShaderFileName;
+}
 const char *AppGetCurrentSoundShaderFileName(){
 	return s_soundShaderFileName;
 }
 const char *AppGetCurrentGraphicsShaderCode(){
 	return s_graphicsShaderCode;
+}
+const char *AppGetCurrentComputeShaderCode(){
+	return s_computeShaderCode;
 }
 const char *AppGetCurrentSoundShaderCode(){
 	return s_soundShaderCode;
@@ -1862,6 +1987,7 @@ bool AppUpdate(){
 	/* FPS 算出 */
 	if (s_graphicsCreateShaderSucceeded
 	&&	s_soundCreateShaderSucceeded
+	&&	s_computeCreateShaderSucceeded
 	) {
 		static int s_frameSkip = 0;
 		static double s_fp64PrevTime = 0.0;
@@ -1943,6 +2069,25 @@ bool AppUpdate(){
 				AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_soundShaderFileName);
 			} else {
 				AppReloadSoundShader();
+			}
+		}
+	}
+
+	/* コンピュートシェーダの更新 */
+	if (IsValidFileName(s_computeShaderFileName)) {
+		if (IsFileUpdated(s_computeShaderFileName, &s_computeShaderFileStat)) {
+			printf("update the compute shader.\n");
+			if (s_computeShaderCode != NULL) free(s_computeShaderCode);
+			for (int retryCount = 0; retryCount < 10; retryCount++) {
+				s_computeShaderCode = MallocReadTextFile(s_computeShaderFileName);
+				if (s_computeShaderCode != NULL) break;
+				printf("retry %d ... \n", retryCount);
+				Sleep(100);
+			}
+			if (s_computeShaderCode == NULL) {
+				AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_computeShaderFileName);
+			} else {
+				AppReloadComputeShader();
 			}
 		}
 	}
@@ -2031,6 +2176,7 @@ bool AppHelpAbout(
 -----------------------------------------------------------------------------*/
 bool AppInitialize(int argc, char **argv){
 	memset(&s_graphicsShaderFileStat, 0, sizeof(s_graphicsShaderFileStat));
+	memset(&s_computeShaderFileStat, 0, sizeof(s_computeShaderFileStat));
 	memset(&s_soundShaderFileStat, 0, sizeof(s_soundShaderFileStat));
 
 	if (HighPrecisionTimerInitialize() == false) {
@@ -2050,6 +2196,7 @@ bool AppInitialize(int argc, char **argv){
 		AppErrorMessageBox(APP_NAME, "GraphicsInitialize() failed.");
 		return false;
 	}
+	AppOpenDefaultComputeShader();
 	AppOpenDefaultGraphicsShader();
 	SoundRestartWaveOut();
 
@@ -2072,6 +2219,10 @@ bool AppTerminate(){
 	if (s_soundShaderCode != NULL) {
 		free(s_soundShaderCode);
 		s_soundShaderCode = NULL;
+	}
+	if (s_computeShaderCode != NULL) {
+		free(s_computeShaderCode);
+		s_computeShaderCode = NULL;
 	}
 	if (s_graphicsShaderCode != NULL) {
 		free(s_graphicsShaderCode);

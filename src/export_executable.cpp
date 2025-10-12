@@ -355,6 +355,7 @@ ApplyWorkAround(
 bool ExportExecutableSub(
 	const char *workDirName,
 	const char *graphicsShaderCode,
+	const char *computeShaderCode,
 	const char *soundShaderCode,
 #if USE_MAIN_CPP
 	const char *mainCppFullPath,
@@ -369,6 +370,8 @@ bool ExportExecutableSub(
 	const char *resourceObjFullPath,
 	const char *graphicsFragmentShaderGlslFullPath,
 	const char *graphicsFragmentShaderInlFullPath,
+	const char *graphicsComputeShaderGlslFullPath,
+	const char *graphicsComputeShaderInlFullPath,
 	const char *soundComputeShaderGlslFullPath,
 	const char *soundComputeShaderInlFullPath,
 	const char *crinklerReportFullPath,
@@ -376,6 +379,7 @@ bool ExportExecutableSub(
 	const char *minifyBatFullPath,
 	const char *buildBatFullPath,
 	const char *outputGraphicsFragmentShaderInlFullPath,
+	const char *outputGraphicsComputeShaderInlFullPath,
 	const char *outputSoundComputeShaderInlFullPath,
 	const RenderSettings *renderSettings,
 	const ExecutableExportSettings *executableExportSettings
@@ -446,6 +450,23 @@ bool ExportExecutableSub(
 		fclose(file);
 	}
 
+	/* graphics_compute_shader.glsl 生成 */
+	{
+		printf("generate %s.\n", graphicsComputeShaderGlslFullPath);
+		FILE *file = fopen(graphicsComputeShaderGlslFullPath, "wt");
+		if (file == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to generate %s.", graphicsComputeShaderGlslFullPath);
+			return false;
+		}
+
+		fprintf(
+			file,
+			"%s\n",
+			computeShaderCode
+		);
+		fclose(file);
+	}
+
 	/* sound_compute_shader.glsl 生成 */
 	{
 		printf("generate %s.\n", soundComputeShaderGlslFullPath);
@@ -465,11 +486,20 @@ bool ExportExecutableSub(
 
 	/* version ディレクティブの除去と保存 */
 	char graphicsFragmentShaderVersionDirectiveBuffer[0x1000];
+	char graphicsComputeShaderVersionDirectiveBuffer[0x1000];
 	char soundComputeShaderVersionDirectiveBuffer[0x1000];
 	if (RemoveAndSaveVersionDirective(
 			graphicsFragmentShaderGlslFullPath,
 			graphicsFragmentShaderVersionDirectiveBuffer,
 			sizeof(graphicsFragmentShaderVersionDirectiveBuffer)
+		) == false
+	) {
+		return false;
+	}
+	if (RemoveAndSaveVersionDirective(
+			graphicsComputeShaderGlslFullPath,
+			graphicsComputeShaderVersionDirectiveBuffer,
+			sizeof(graphicsComputeShaderVersionDirectiveBuffer)
 		) == false
 	) {
 		return false;
@@ -565,6 +595,7 @@ bool ExportExecutableSub(
 			/*
 				プリプロセッサの適用
 				graphics_fragment_shader.glsl -> graphics_fragment_shader.i
+				graphics_compute_shader.glsl -> graphics_compute_shader.i
 				sound_compute_shader.glsl -> sound_compute_shader.i
 
 				cl の引数
@@ -575,34 +606,42 @@ bool ExportExecutableSub(
 			fprintf(
 				file,
 				"cl /P /EP /DEXPORT_EXECUTABLE=1 /DSCREEN_XRESO=%d /DSCREEN_YRESO=%d graphics_fragment_shader.glsl || exit /b 2\n"		/* arg 1,2 */
-				"cl /P /EP /DEXPORT_EXECUTABLE=1 /DSCREEN_XRESO=%d /DSCREEN_YRESO=%d sound_compute_shader.glsl || exit /b 3\n"			/* arg 3,4 */
+				"cl /P /EP /DEXPORT_EXECUTABLE=1 /DSCREEN_XRESO=%d /DSCREEN_YRESO=%d graphics_compute_shader.glsl || exit /b 3\n"		/* arg 3,4 */
+				"cl /P /EP /DEXPORT_EXECUTABLE=1 /DSCREEN_XRESO=%d /DSCREEN_YRESO=%d sound_compute_shader.glsl || exit /b 4\n"			/* arg 5,6 */
 				,
 				executableExportSettings->xReso, executableExportSettings->yReso,		/* arg 1,2 */
-				executableExportSettings->xReso, executableExportSettings->yReso		/* arg 3,4 */
+				executableExportSettings->xReso, executableExportSettings->yReso,		/* arg 3,4 */
+				executableExportSettings->xReso, executableExportSettings->yReso		/* arg 5,6 */
 			);
 
 			/* version ディレクティブの復元 */
 			fprintf(
 				file,
 				"echo %s > graphics_fragment_shader.version\n"							/* arg 1 */
-				"echo %s > sound_compute_shader.version\n"								/* arg 2 */
+				"echo %s > graphics_compute_shader.version\n"							/* arg 2 */
+				"echo %s > sound_compute_shader.version\n"								/* arg 3 */
 				"copy /b graphics_fragment_shader.version + graphics_fragment_shader.i graphics_fragment_shader.tmp\n"
+				"copy /b graphics_compute_shader.version + graphics_compute_shader.i graphics_compute_shader.tmp\n"
 				"copy /b sound_compute_shader.version + sound_compute_shader.i sound_compute_shader.tmp\n"
 				"del graphics_fragment_shader.version\n"
+				"del graphics_compute_shader.version\n"
 				"del sound_compute_shader.version\n"
 				"del graphics_fragment_shader.i\n"
+				"del graphics_compute_shader.i\n"
 				"del sound_compute_shader.i\n"
 				"rename graphics_fragment_shader.tmp graphics_fragment_shader.i\n"
+				"rename graphics_compute_shader.tmp graphics_compute_shader.i\n"
 				"rename sound_compute_shader.tmp sound_compute_shader.i\n"
 				,
 				graphicsFragmentShaderVersionDirectiveBuffer,							/* arg 1 */
-				soundComputeShaderVersionDirectiveBuffer								/* arg 2 */
+				graphicsComputeShaderVersionDirectiveBuffer,							/* arg 2 */
+				soundComputeShaderVersionDirectiveBuffer								/* arg 3 */
 			);
 
 			/* shader_minifier.exe の存在チェック */
 			fprintf(
 				file,
-				"%swhere shader_minifier.exe || exit /b 4\n"							/* arg 1 = enableWhereShaderMinifier? "" : "rem " */
+				"%swhere shader_minifier.exe || exit /b 5\n"							/* arg 1 = enableWhereShaderMinifier? "" : "rem " */
 				,
 				enableWhereShaderMinifier? "" : "rem "									/* arg 1 */
 			);
@@ -610,15 +649,18 @@ bool ExportExecutableSub(
 			/*
 				shader_minifier を実行
 				graphics_fragment_shader.i -> graphics_fragment_shader.inl
+				graphics_compute_shader.i -> graphics_compute_shader.inl
 				sound_compute_shader.i -> sound_compute_shader.inl
 			*/
 			fprintf(
 				file,
-				"\"%s\" %s graphics_fragment_shader.i -o graphics_fragment_shader.inl --format c-array || exit /b 5\n"		/* arg 1,2 = shader_minifier.exe のパスと引数 */
-				"\"%s\" %s sound_compute_shader.i -o sound_compute_shader.inl --format c-array || exit /b 6\n"				/* arg 3,4 = shader_minifier.exe のパスと引数 */
+				"\"%s\" %s graphics_fragment_shader.i -o graphics_fragment_shader.inl --format c-array || exit /b 6\n"		/* arg 1,2 = shader_minifier.exe のパスと引数 */
+				"\"%s\" %s graphics_compute_shader.i -o graphics_compute_shader.inl --format c-array || exit /b 7\n"		/* arg 3,4 = shader_minifier.exe のパスと引数 */
+				"\"%s\" %s sound_compute_shader.i -o sound_compute_shader.inl --format c-array || exit /b 8\n"				/* arg 5,6 = shader_minifier.exe のパスと引数 */
 				,
 				shaderMinifierPath, shaderMinifierOptions,								/* arg 1,2 */
-				shaderMinifierPath, shaderMinifierOptions								/* arg 3,4 */
+				shaderMinifierPath, shaderMinifierOptions,								/* arg 3,4 */
+				shaderMinifierPath, shaderMinifierOptions								/* arg 5,6 */
 			);
 
 			fclose(file);
@@ -637,9 +679,12 @@ bool ExportExecutableSub(
 					AppErrorMessageBox(APP_NAME, "Failed to pre-process graphics fragment shader.");
 				} break;
 				case 3: {
-					AppErrorMessageBox(APP_NAME, "Failed to pre-process sound compute shader.");
+					AppErrorMessageBox(APP_NAME, "Failed to pre-process graphics compute shader.");
 				} break;
 				case 4: {
+					AppErrorMessageBox(APP_NAME, "Failed to pre-process sound compute shader.");
+				} break;
+				case 5: {
 					AppErrorMessageBox(
 						APP_NAME,
 						"Failed to execute shader_minifier.exe.\n"
@@ -650,10 +695,13 @@ bool ExportExecutableSub(
 						"https://github.com/laurentlb/Shader_Minifier"
 					);
 				} break;
-				case 5: {
+				case 6: {
 					AppErrorMessageBox(APP_NAME, "Failed to minify graphics fragment shader.");
 				} break;
-				case 6: {
+				case 7: {
+					AppErrorMessageBox(APP_NAME, "Failed to minify graphics compute shader.");
+				} break;
+				case 8: {
 					AppErrorMessageBox(APP_NAME, "Failed to minify sound compute shader.");
 				} break;
 				default: {
@@ -668,12 +716,18 @@ bool ExportExecutableSub(
 	if (RemoveComma(graphicsFragmentShaderInlFullPath) == false) {
 		return false;
 	};
+	if (RemoveComma(graphicsComputeShaderInlFullPath) == false) {
+		return false;
+	};
 	if (RemoveComma(soundComputeShaderInlFullPath) == false) {
 		return false;
 	}
 
 	/* ワークアラウンドの適用 */
 	if (ApplyWorkAround(graphicsFragmentShaderInlFullPath) == false) {
+		return false;
+	}
+	if (ApplyWorkAround(graphicsComputeShaderInlFullPath) == false) {
 		return false;
 	}
 	if (ApplyWorkAround(soundComputeShaderInlFullPath) == false) {
@@ -912,10 +966,12 @@ bool ExportExecutableSub(
 			fprintf(
 				file,
 				"copy graphics_fragment_shader.inl \"%s\" || exit /b 6\n"	/* arg 1 = graphics_fragment_shader.inl コピー先 */
-				"copy sound_compute_shader.inl \"%s\" || exit /b 7\n"		/* arg 2 = sound_compute_shader.inl コピー先 */
+				"copy graphics_compute_shader.inl \"%s\" || exit /b 7\n"	/* arg 2 = graphics_compute_shader.inl コピー先 */
+				"copy sound_compute_shader.inl \"%s\" || exit /b 8\n"		/* arg 3 = sound_compute_shader.inl コピー先 */
 				,
 				outputGraphicsFragmentShaderInlFullPath,					/* arg 1 */
-				outputSoundComputeShaderInlFullPath							/* arg 2 */
+				outputGraphicsComputeShaderInlFullPath,					/* arg 2 */
+				outputSoundComputeShaderInlFullPath							/* arg 3 */
 			);
 
 			fclose(file);
@@ -958,6 +1014,9 @@ bool ExportExecutableSub(
 					AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputGraphicsFragmentShaderInlFullPath);
 				} break;
 				case 7: {
+					AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputGraphicsComputeShaderInlFullPath);
+				} break;
+				case 8: {
 					AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputSoundComputeShaderInlFullPath);
 				} break;
 				default: {
@@ -977,6 +1036,7 @@ bool ExportExecutableSub(
 -----------------------------------------------------------------------------*/
 bool ExportExecutable(
 	const char *graphicsShaderCode,
+	const char *computeShaderCode,
 	const char *soundShaderCode,
 	const RenderSettings *renderSettings,
 	const ExecutableExportSettings *executableExportSettings
@@ -1043,6 +1103,9 @@ bool ExportExecutable(
 	char graphicsFragmentShaderGlslFullPath[MAX_PATH] = {0};
 	char graphicsFragmentShaderTmpFullPath[MAX_PATH] = {0};
 	char graphicsFragmentShaderInlFullPath[MAX_PATH] = {0};
+	char graphicsComputeShaderGlslFullPath[MAX_PATH] = {0};
+	char graphicsComputeShaderTmpFullPath[MAX_PATH] = {0};
+	char graphicsComputeShaderInlFullPath[MAX_PATH] = {0};
 	char soundComputeShaderGlslFullPath[MAX_PATH] = {0};
 	char soundComputeShaderTmpFullPath[MAX_PATH] = {0};
 	char soundComputeShaderInlFullPath[MAX_PATH] = {0};
@@ -1051,6 +1114,7 @@ bool ExportExecutable(
 	char minifyBatFullPath[MAX_PATH] = {0};
 	char buildBatFullPath[MAX_PATH] = {0};
 	char outputGraphicsFragmentShaderInlFullPath[MAX_PATH] = {0};
+	char outputGraphicsComputeShaderInlFullPath[MAX_PATH] = {0};
 	char outputSoundComputeShaderInlFullPath[MAX_PATH] = {0};
 #if USE_MAIN_CPP
 	snprintf(mainCppFullPath, sizeof(mainCppFullPath), "%s\\main.cpp", workDirName);
@@ -1066,6 +1130,9 @@ bool ExportExecutable(
 	snprintf(graphicsFragmentShaderGlslFullPath, sizeof(graphicsFragmentShaderGlslFullPath), "%s\\graphics_fragment_shader.glsl", workDirName);
 	snprintf(graphicsFragmentShaderTmpFullPath,  sizeof(graphicsFragmentShaderTmpFullPath),  "%s\\graphics_fragment_shader.i",  workDirName);
 	snprintf(graphicsFragmentShaderInlFullPath,  sizeof(graphicsFragmentShaderInlFullPath),  "%s\\graphics_fragment_shader.inl",  workDirName);
+	snprintf(graphicsComputeShaderGlslFullPath, sizeof(graphicsComputeShaderGlslFullPath), "%s\\graphics_compute_shader.glsl", workDirName);
+	snprintf(graphicsComputeShaderTmpFullPath,  sizeof(graphicsComputeShaderTmpFullPath),  "%s\\graphics_compute_shader.i",  workDirName);
+	snprintf(graphicsComputeShaderInlFullPath,  sizeof(graphicsComputeShaderInlFullPath),  "%s\\graphics_compute_shader.inl",  workDirName);
 	snprintf(soundComputeShaderGlslFullPath, sizeof(soundComputeShaderGlslFullPath), "%s\\sound_compute_shader.glsl", workDirName);
 	snprintf(soundComputeShaderTmpFullPath,  sizeof(soundComputeShaderTmpFullPath),  "%s\\sound_compute_shader.i",  workDirName);
 	snprintf(soundComputeShaderInlFullPath,  sizeof(soundComputeShaderInlFullPath),  "%s\\sound_compute_shader.inl",  workDirName);
@@ -1074,6 +1141,7 @@ bool ExportExecutable(
 	snprintf(minifyBatFullPath, sizeof(minifyBatFullPath), "%s\\minify.bat", workDirName);
 	snprintf(buildBatFullPath, sizeof(buildBatFullPath), "%s\\build.bat", workDirName);
 	snprintf(outputGraphicsFragmentShaderInlFullPath, sizeof(outputGraphicsFragmentShaderInlFullPath), "%s.gfx.inl", executableExportSettings->fileName);
+	snprintf(outputGraphicsComputeShaderInlFullPath, sizeof(outputGraphicsComputeShaderInlFullPath), "%s.cmp.inl", executableExportSettings->fileName);
 	snprintf(outputSoundComputeShaderInlFullPath, sizeof(outputSoundComputeShaderInlFullPath), "%s.snd.inl", executableExportSettings->fileName);
 
 	/* 上書き確認 */
@@ -1081,6 +1149,7 @@ bool ExportExecutable(
 	||	DialogConfirmOverWrite(crinklerReportFullPath) == DialogConfirmOverWriteResult_Canceled
 	||	DialogConfirmOverWrite(crinklerReuseFullPath) == DialogConfirmOverWriteResult_Canceled
 	||	DialogConfirmOverWrite(outputGraphicsFragmentShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
+	||	DialogConfirmOverWrite(outputGraphicsComputeShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
 	||	DialogConfirmOverWrite(outputSoundComputeShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
 	) {
 		return false;
@@ -1090,6 +1159,7 @@ bool ExportExecutable(
 	bool ret = ExportExecutableSub(
 		workDirName,
 		graphicsShaderCode,
+		computeShaderCode,
 		soundShaderCode,
 #if USE_MAIN_CPP
 		mainCppFullPath,
@@ -1104,6 +1174,8 @@ bool ExportExecutable(
 		resourceObjFullPath,
 		graphicsFragmentShaderGlslFullPath,
 		graphicsFragmentShaderInlFullPath,
+		graphicsComputeShaderGlslFullPath,
+		graphicsComputeShaderInlFullPath,
 		soundComputeShaderGlslFullPath,
 		soundComputeShaderInlFullPath,
 		crinklerReportFullPath,
@@ -1111,6 +1183,7 @@ bool ExportExecutable(
 		minifyBatFullPath,
 		buildBatFullPath,
 		outputGraphicsFragmentShaderInlFullPath,
+		outputGraphicsComputeShaderInlFullPath,
 		outputSoundComputeShaderInlFullPath,
 		renderSettings,
 		executableExportSettings
@@ -1134,6 +1207,9 @@ bool ExportExecutable(
 	remove(graphicsFragmentShaderGlslFullPath);
 	remove(graphicsFragmentShaderTmpFullPath);
 	remove(graphicsFragmentShaderInlFullPath);
+	remove(graphicsComputeShaderGlslFullPath);
+	remove(graphicsComputeShaderTmpFullPath);
+	remove(graphicsComputeShaderInlFullPath);
 #if USE_MAIN_CPP
 	remove(mainCppFullPath);
 	remove(glextHeaderFullPath);
@@ -1180,4 +1256,3 @@ bool ExportExecutable(
 #endif
 	return ret;
 }
-

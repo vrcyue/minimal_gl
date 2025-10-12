@@ -13,6 +13,7 @@
 
 
 #define USER_TEXTURE_START_INDEX				(8)
+#define COMPUTE_TEXTURE_START_INDEX				(4)
 #define BUFFER_INDEX_FOR_SOUND_VISUALIZER_INPUT	(0)
 
 static GLuint s_mrtTextures[2 /* 裏表 */][NUM_RENDER_TARGETS] = {{0}};
@@ -24,9 +25,17 @@ static struct {
 static GLuint s_shaderPipelineId = 0;
 static GLuint s_vertexShaderId = 0;
 static GLuint s_fragmentShaderId = 0;
+static GLuint s_computeTextures[2 /* 裏表 */][NUM_RENDER_TARGETS] = {{0}};
+static GLuint s_computeShaderId = 0;
+static GLint s_computeWorkGroupSize[3] = {1, 1, 1};
 static RenderSettings s_currentRenderSettings = {(PixelFormat)0};
 static int s_xReso = DEFAULT_SCREEN_XRESO;
 static int s_yReso = DEFAULT_SCREEN_YRESO;
+
+static void GraphicsDispatchCompute(
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+);
 
 
 static void GraphicsCreateFrameBuffer(
@@ -34,6 +43,8 @@ static void GraphicsCreateFrameBuffer(
 	int yReso,
 	const RenderSettings *settings
 ){
+	GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(settings->pixelFormat);
+
 	/* MRT フレームバッファ作成 */
 	glGenFramebuffers(
 		/* GLsizei n */		1,
@@ -54,40 +65,96 @@ static void GraphicsCreateFrameBuffer(
 				/* GLuint texture */	s_mrtTextures[doubleBufferIndex][renderTargetIndex]
 			);
 
-			GLint internalformat = 0;
-			GLenum type = 0;
-			switch (settings->pixelFormat) {
-				case PixelFormatUnorm8Rgba: {
-					internalformat = GL_RGBA;
-					type = GL_UNSIGNED_BYTE;
-				} break;
-				case PixelFormatFp16Rgba: {
-					internalformat = GL_RGBA16F;
-					type = GL_HALF_FLOAT;
-				} break;
-				case PixelFormatFp32Rgba: {
-					internalformat = GL_RGBA32F;
-					type = GL_FLOAT;
-				} break;
-				default: {
-					assert(false);
-				} break;
-			}
-
 			/* テクスチャリソースを生成 */
 			glTexImage2D(
 				/* GLenum target */			GL_TEXTURE_2D,
 				/* GLint level */			0,
-				/* GLint internalformat */	internalformat,
+				/* GLint internalformat */	pixelFormatInfo.internalformat,
 				/* GLsizei width */			xReso,
 				/* GLsizei height */		yReso,
 				/* GLint border */			0,
-				/* GLenum format */			GL_RGBA,
-				/* GLenum type */			type,
+				/* GLenum format */			pixelFormatInfo.format,
+				/* GLenum type */			pixelFormatInfo.type,
 				/* const void * data */		NULL
 			);
 		}
 	}
+}
+
+static void GraphicsDeleteComputeTextures(
+){
+	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex++) {
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex++) {
+			GLuint textureId = s_computeTextures[doubleBufferIndex][renderTargetIndex];
+			if (textureId != 0) {
+				glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX + renderTargetIndex);
+				glBindTexture(
+					/* GLenum target */		GL_TEXTURE_2D,
+					/* GLuint texture */	0	/* unbind */
+				);
+				glDeleteTextures(
+					/* GLsizei n */					1,
+					/* const GLuint * textures */	&s_computeTextures[doubleBufferIndex][renderTargetIndex]
+				);
+				s_computeTextures[doubleBufferIndex][renderTargetIndex] = 0;
+			}
+		}
+	}
+	GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(s_currentRenderSettings.pixelFormat);
+	for (int imageUnit = 0; imageUnit < NUM_RENDER_TARGETS * 2; ++imageUnit) {
+		glBindImageTexture(
+			/* GLuint unit */			imageUnit,
+			/* GLuint texture */		0,
+			/* GLint level */			0,
+			/* GLboolean layered */		GL_FALSE,
+			/* GLint layer */			0,
+			/* GLenum access */			GL_READ_ONLY,
+			/* GLenum format */			pixelFormatInfo.internalformat
+		);
+	}
+	glActiveTexture(GL_TEXTURE0);
+}
+
+static void GraphicsCreateComputeTextures(
+	int xReso,
+	int yReso,
+	const RenderSettings *settings
+){
+	GraphicsDeleteComputeTextures();
+
+	GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(settings->pixelFormat);
+
+	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex++) {
+		glGenTextures(
+			/* GLsizei n */				NUM_RENDER_TARGETS,
+			/* GLuint * textures */		s_computeTextures[doubleBufferIndex]
+		);
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex++) {
+			glBindTexture(
+				/* GLenum target */		GL_TEXTURE_2D,
+				/* GLuint texture */	s_computeTextures[doubleBufferIndex][renderTargetIndex]
+			);
+			glTexImage2D(
+				/* GLenum target */			GL_TEXTURE_2D,
+				/* GLint level */			0,
+				/* GLint internalformat */	pixelFormatInfo.internalformat,
+				/* GLsizei width */			xReso,
+				/* GLsizei height */		yReso,
+				/* GLint border */			0,
+				/* GLenum format */			pixelFormatInfo.format,
+				/* GLenum type */			pixelFormatInfo.type,
+				/* const void * data */		NULL
+			);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		}
+	}
+	glBindTexture(
+		/* GLenum target */		GL_TEXTURE_2D,
+		/* GLuint texture */	0	/* unbind */
+	);
 }
 
 static void GraphicsDeleteFrameBuffer(
@@ -125,21 +192,41 @@ static void GraphicsDeleteFrameBuffer(
 
 void GraphicsClearAllRenderTargets(){
 	GraphicsDeleteFrameBuffer();
+	GraphicsDeleteComputeTextures();
 	GraphicsCreateFrameBuffer(s_xReso, s_yReso, &s_currentRenderSettings);
+	GraphicsCreateComputeTextures(s_xReso, s_yReso, &s_currentRenderSettings);
 }
 
 bool GraphicsShaderRequiresFrameCountUniform(){
 	if (s_fragmentShaderId != 0) {
-		return ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT);
+		if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
+			return true;
+		}
+	}
+	if (s_computeShaderId != 0) {
+		if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
+			return true;
+		}
 	}
 	return false;
 }
 
 bool GraphicsShaderRequiresCameraControlUniforms(){
 	if (s_fragmentShaderId != 0) {
-		return
+		if (
 			ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)
-		||	ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4);
+		||	ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)
+		) {
+			return true;
+		}
+	}
+	if (s_computeShaderId != 0) {
+		if (
+			ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)
+		||	ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)
+		) {
+			return true;
+		}
 	}
 	return false;
 }
@@ -495,6 +582,47 @@ bool GraphicsDeleteFragmentShader(
 	return true;
 }
 
+bool GraphicsCreateComputeShader(
+	const char *shaderCode
+){
+	printf("setup the compute shader ...\n");
+	const GLchar *(strings[]) = {
+		SkipBomConst(shaderCode)
+	};
+	assert(s_computeShaderId == 0);
+	s_computeShaderId = CreateShader(GL_COMPUTE_SHADER, SIZE_OF_ARRAY(strings), strings);
+	if (s_computeShaderId == 0) {
+		printf("setup the compute shader ... failed.\n");
+		return false;
+	}
+	glGetProgramiv(
+		/* GLuint program */	s_computeShaderId,
+		/* GLenum pname */		GL_COMPUTE_WORK_GROUP_SIZE,
+		/* GLint *params */		s_computeWorkGroupSize
+	);
+	for (int i = 0; i < 3; ++i) {
+		if (s_computeWorkGroupSize[i] <= 0) {
+			s_computeWorkGroupSize[i] = 1;
+		}
+	}
+	DumpShaderInterfaces(s_computeShaderId);
+	printf("setup the compute shader ... done.\n");
+
+	return true;
+}
+
+bool GraphicsDeleteComputeShader(
+){
+	if (s_computeShaderId == 0) return false;
+	glFinish();
+	glDeleteProgram(s_computeShaderId);
+	s_computeShaderId = 0;
+	s_computeWorkGroupSize[0] = 1;
+	s_computeWorkGroupSize[1] = 1;
+	s_computeWorkGroupSize[2] = 1;
+	return true;
+}
+
 bool GraphicsCreateShaderPipeline(
 ){
 	assert(s_shaderPipelineId == 0);
@@ -592,7 +720,9 @@ static void GraphicsDrawFullScreenQuad(
 		s_yReso = params->yReso;
 		s_currentRenderSettings = *settings;
 		GraphicsDeleteFrameBuffer();
+		GraphicsDeleteComputeTextures();
 		GraphicsCreateFrameBuffer(params->xReso, params->yReso, settings);
+		GraphicsCreateComputeTextures(params->xReso, params->yReso, settings);
 	}
 
 	/* シェーダパイプラインのバインド */
@@ -616,6 +746,23 @@ static void GraphicsDrawFullScreenQuad(
 			/* ミップマップ生成 */
 			if (settings->enableMipmapGeneration) {
 				glGenerateMipmap(GL_TEXTURE_2D);
+			}
+		}
+	}
+
+	/* コンピュートテクスチャの設定 */
+	if (s_computeShaderId != 0) {
+		int computeTextureIndex = (params->frameCount & 1) ^ 1;
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; renderTargetIndex++) {
+			if (s_computeTextures[computeTextureIndex][renderTargetIndex] != 0) {
+				glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX + renderTargetIndex);
+				glBindTexture(
+					/* GLenum target */		GL_TEXTURE_2D,
+					/* GLuint texture */	s_computeTextures[computeTextureIndex][renderTargetIndex]
+				);
+
+				/* サンプラの設定 */
+				GraphicsSetTextureSampler(GL_TEXTURE_2D, settings->textureFilter, settings->textureWrap, false);
 			}
 		}
 	}
@@ -813,6 +960,17 @@ static void GraphicsDrawFullScreenQuad(
 		}
 	}
 
+	/* コンピュートテクスチャのアンバインド */
+	if (s_computeShaderId != 0) {
+		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; renderTargetIndex++) {
+			glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX + renderTargetIndex);
+			glBindTexture(
+				/* GLenum target */		GL_TEXTURE_2D,
+				/* GLuint texture */	0	/* unbind */
+			);
+		}
+	}
+
 	/* MRT テクスチャのアンバインド */
 	for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; renderTargetIndex++) {
 		glActiveTexture(GL_TEXTURE0 + renderTargetIndex);
@@ -883,6 +1041,7 @@ bool GraphicsCaptureScreenShotOnMemory(
 	);
 
 	/* 画面全体に四角形を描画 */
+	GraphicsDispatchCompute(params, renderSettings);
 	GraphicsDrawFullScreenQuad(offscreenRenderTargetFbo, params, renderSettings);
 
 	/* 描画結果の取得 */
@@ -1052,6 +1211,7 @@ bool GraphicsCaptureAsDdsCubemap(
 	);
 
 	/* キューブマップ各面の描画と結果の取得 */
+	GraphicsDispatchCompute(params, renderSettings);
 	void *(data[6]);
 	for (int iFace = 0; iFace < 6; iFace++) {
 		/*
@@ -1289,10 +1449,155 @@ bool GraphicsCaptureAsDdsCubemap(
 	return ret;
 }
 
+static void GraphicsDispatchCompute(
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+){
+	if (s_computeShaderId == 0) return;
+
+	int readIndex = (params->frameCount & 1) ^ 1;
+	int writeIndex = (params->frameCount & 1);
+
+	bool texturesReady = true;
+	for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
+		if (s_computeTextures[readIndex][renderTargetIndex] == 0
+		||	s_computeTextures[writeIndex][renderTargetIndex] == 0
+		) {
+			texturesReady = false;
+			break;
+		}
+	}
+	if (texturesReady == false) return;
+
+	GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(settings->pixelFormat);
+
+	for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
+		glBindImageTexture(
+			/* GLuint unit */			renderTargetIndex,
+			/* GLuint texture */		s_computeTextures[readIndex][renderTargetIndex],
+			/* GLint level */			0,
+			/* GLboolean layered */		GL_FALSE,
+			/* GLint layer */			0,
+			/* GLenum access */			GL_READ_ONLY,
+			/* GLenum format */			pixelFormatInfo.internalformat
+		);
+		glBindImageTexture(
+			/* GLuint unit */			NUM_RENDER_TARGETS + renderTargetIndex,
+			/* GLuint texture */		s_computeTextures[writeIndex][renderTargetIndex],
+			/* GLint level */			0,
+			/* GLboolean layered */		GL_FALSE,
+			/* GLint layer */			0,
+			/* GLenum access */			GL_WRITE_ONLY,
+			/* GLenum format */			pixelFormatInfo.internalformat
+		);
+	}
+
+	glUseProgram(s_computeShaderId);
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
+		glUniform1i(
+			/* GLint location */	UNIFORM_LOCATION_WAVE_OUT_POS,
+			/* GLint v0 */			params->waveOutPos
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
+		glUniform1i(
+			/* GLint location */	UNIFORM_LOCATION_FRAME_COUNT,
+			/* GLint v0 */			params->frameCount
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_TIME, GL_FLOAT)) {
+		glUniform1f(
+			/* GLint location */	UNIFORM_LOCATION_TIME,
+			/* GLfloat v0 */		params->time
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_RESO, GL_FLOAT_VEC2)) {
+		glUniform2f(
+			/* GLint location */	UNIFORM_LOCATION_RESO,
+			/* GLfloat v0 */		(GLfloat)params->xReso,
+			/* GLfloat v1 */		(GLfloat)params->yReso
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_MOUSE_POS, GL_FLOAT_VEC2)) {
+		glUniform2f(
+			/* GLint location */	UNIFORM_LOCATION_MOUSE_POS,
+			/* GLfloat v0 */		(GLfloat)params->xMouse / (GLfloat)params->xReso,
+			/* GLfloat v1 */		1.0f - (GLfloat)params->yMouse / (GLfloat)params->yReso
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_MOUSE_BUTTONS, GL_INT_VEC3)) {
+		glUniform3i(
+			/* GLint location */	UNIFORM_LOCATION_MOUSE_BUTTONS,
+			/* GLint v0 */			params->mouseLButtonPressed,
+			/* GLint v1 */			params->mouseMButtonPressed,
+			/* GLint v2 */			params->mouseRButtonPressed
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)) {
+		glUniform1f(
+			/* GLint location */	UNIFORM_LOCATION_TAN_FOVY,
+			/* GLfloat v0 */		tanf(params->fovYInRadians)
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)) {
+		glUniformMatrix4fv(
+			/* GLint location */		UNIFORM_LOCATION_CAMERA_COORD,
+			/* GLsizei count */			1,
+			/* GLboolean transpose */	false,
+			/* const GLfloat *value */	&params->mat4x4CameraInWorld[0][0]
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_PREV_CAMERA_COORD, GL_FLOAT_MAT4)) {
+		glUniformMatrix4fv(
+			/* GLint location */		UNIFORM_LOCATION_PREV_CAMERA_COORD,
+			/* GLsizei count */			1,
+			/* GLboolean transpose */	false,
+			/* const GLfloat *value */	&params->mat4x4PrevCameraInWorld[0][0]
+		);
+	}
+
+	GLuint workGroupSizeX = (GLuint)(s_computeWorkGroupSize[0] > 0? s_computeWorkGroupSize[0]: 1);
+	GLuint workGroupSizeY = (GLuint)(s_computeWorkGroupSize[1] > 0? s_computeWorkGroupSize[1]: 1);
+	GLuint workGroupSizeZ = (GLuint)(s_computeWorkGroupSize[2] > 0? s_computeWorkGroupSize[2]: 1);
+
+	GLuint numGroupsX = (GLuint)((params->xReso + workGroupSizeX - 1) / workGroupSizeX);
+	GLuint numGroupsY = (GLuint)((params->yReso + workGroupSizeY - 1) / workGroupSizeY);
+	GLuint numGroupsZ = (GLuint)((1 + workGroupSizeZ - 1) / workGroupSizeZ);
+	if (numGroupsX == 0) numGroupsX = 1;
+	if (numGroupsY == 0) numGroupsY = 1;
+	if (numGroupsZ == 0) numGroupsZ = 1;
+
+	glDispatchCompute(
+		/* GLuint num_groups_x */	numGroupsX,
+		/* GLuint num_groups_y */	numGroupsY,
+		/* GLuint num_groups_z */	numGroupsZ
+	);
+
+	glMemoryBarrier(
+			GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
+		|	GL_TEXTURE_FETCH_BARRIER_BIT
+		|	GL_TEXTURE_UPDATE_BARRIER_BIT
+	);
+
+	for (int imageUnit = 0; imageUnit < NUM_RENDER_TARGETS * 2; ++imageUnit) {
+		glBindImageTexture(
+			/* GLuint unit */			imageUnit,
+			/* GLuint texture */		0,
+			/* GLint level */			0,
+			/* GLboolean layered */		GL_FALSE,
+			/* GLint layer */			0,
+			/* GLenum access */			GL_READ_ONLY,
+			/* GLenum format */			pixelFormatInfo.internalformat
+		);
+	}
+}
+
 void GraphicsUpdate(
 	const CurrentFrameParams *params,
 	const RenderSettings *settings
 ){
+	GraphicsDispatchCompute(params, settings);
+
 	/* 画面全体に四角形を描画 */
 	GraphicsDrawFullScreenQuad(
 		0,		/* デフォルトフレームバッファに出力 */
@@ -1325,6 +1630,7 @@ void GraphicsUpdate(
 bool GraphicsInitialize(
 ){
 	GraphicsCreateFrameBuffer(s_xReso, s_yReso, &s_currentRenderSettings);
+	GraphicsCreateComputeTextures(s_xReso, s_yReso, &s_currentRenderSettings);
 
 	/* glRects() 相当の動作を模倣する簡単な頂点シェーダを作成 */
 	{
@@ -1344,8 +1650,10 @@ bool GraphicsInitialize(
 
 bool GraphicsTerminate(
 ){
+	GraphicsDeleteComputeShader();	/* false が得られてもエラー扱いとしない */
 	GraphicsDeleteFragmentShader();	/* false が得られてもエラー扱いとしない */
 	GraphicsDeleteVertexShader();	/* false が得られてもエラー扱いとしない */
+	GraphicsDeleteComputeTextures();
 	GraphicsDeleteFrameBuffer();
 	return true;
 }

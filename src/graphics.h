@@ -102,6 +102,14 @@ bool GraphicsCreateFragmentShader(
 /* フラグメントシェーダの削除 */
 bool GraphicsDeleteFragmentShader();
 
+/* コンピュートシェーダの作成 */
+bool GraphicsCreateComputeShader(
+	const char *shaderCode
+);
+
+/* コンピュートシェーダの削除 */
+bool GraphicsDeleteComputeShader();
+
 /* シェーダパイプラインの作成 */
 bool GraphicsCreateShaderPipeline();
 

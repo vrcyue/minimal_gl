@@ -17,6 +17,7 @@
 #define IDM_EXPORT_PROJECT												0x208
 #define IDM_LOAD_USER_TEXTURES											0x209
 #define IDM_QUIT														0x20A
+#define IDM_OPEN_COMPUTE_SHADER										0x20B
 
 #define IDM_RENDER_SETTINGS												0x210
 #define IDM_PREFERENCE_SETTINGS											0x211
@@ -33,6 +34,7 @@
 #define IDM_LOAD_DEFAULT_GRAPHICS_SHADER								0x229
 #define IDM_LOAD_DEFAULT_SOUND_SHADER									0x22A
 #define IDM_TOGGLE_FULL_SCREEN											0x22B
+#define IDM_LOAD_DEFAULT_COMPUTE_SHADER								0x22C
 
 #define IDM_TOGGLE_DISPLAY_CURRENT_STATUS								0x230
 #define IDM_TOGGLE_DISPLAY_CAMERA_SETTINGS								0x231

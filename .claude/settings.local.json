@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__codex__codex"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

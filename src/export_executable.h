@@ -48,6 +48,7 @@ struct ExecutableExportSettings {
 /* exe ファイルにエクスポート */
 bool ExportExecutable(
 	const char *graphicsShaderCode,
+	const char *computeShaderCode,
 	const char *soundShaderCode,
 	const RenderSettings *renderSettings,
 	const ExecutableExportSettings *executableExportSettings
