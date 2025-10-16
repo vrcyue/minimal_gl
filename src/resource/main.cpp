@@ -135,6 +135,75 @@ static int s_activePipelinePassIndex = -1;
 static GLint s_fragmentPipelinePassUniformLocation = -1;
 static GLint s_computePipelinePassUniformLocation = -1;
 
+/*=============================================================================
+▼	各種リソースの取り込み
+-----------------------------------------------------------------------------*/
+#include "resource.cpp"
+
+
+/*=============================================================================
+▼	OpenGL 関数テーブル
+-----------------------------------------------------------------------------*/
+static void *s_glExtFunctions[NUM_GLEXT_FUNCTIONS] = {0};
+
+
+/*=============================================================================
+▼	各種構造体
+-----------------------------------------------------------------------------*/
+static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
+static GLuint s_graphicsComputeProgramId = 0;
+
+/*=============================================================================
+▼	ローカル関数（CRT 非依存）
+-----------------------------------------------------------------------------*/
+static size_t PipelineStrLen(const char *str){
+	size_t len = 0;
+	if (str == NULL) return 0;
+	while (str[len] != '\0') {
+		++len;
+	}
+	return len;
+}
+
+static int PipelineStrncmp(const char *lhs, const char *rhs, size_t count){
+	if (lhs == NULL || rhs == NULL) return (lhs == rhs)? 0: (lhs? 1: -1);
+	for (size_t i = 0; i < count; ++i) {
+		unsigned char a = (unsigned char)lhs[i];
+		unsigned char b = (unsigned char)rhs[i];
+		if (a != b || a == '\0' || b == '\0') {
+			return (int)a - (int)b;
+		}
+	}
+	return 0;
+}
+
+static int PipelineAtoi(const char *str){
+	if (str == NULL) return 0;
+	int sign = 1;
+	int value = 0;
+	if (*str == '+') {
+		++str;
+	} else if (*str == '-') {
+		sign = -1;
+		++str;
+	}
+	while (*str >= '0' && *str <= '9') {
+		value = value * 10 + (*str - '0');
+		++str;
+	}
+	return sign * value;
+}
+
+static void *PipelineMemcpy(void *dst, const void *src, size_t size){
+	if (dst == NULL || src == NULL) return dst;
+	unsigned char *d = (unsigned char*)dst;
+	const unsigned char *s = (const unsigned char*)src;
+	for (size_t i = 0; i < size; ++i) {
+		d[i] = s[i];
+	}
+	return dst;
+}
+
 static void PipelineDeleteRuntimeResource(PipelineRuntimeResourceState *state){
 	if (state == NULL) return;
 	if (state->initialized == false) return;
@@ -318,14 +387,14 @@ static bool PipelineParseLegacyResourceIndex(
 	int *outIndex
 ){
 	if (resource == NULL || prefix == NULL) return false;
-	size_t prefixLength = strlen(prefix);
-	if (strncmp(resource->id, prefix, prefixLength) != 0) {
+	size_t prefixLength = PipelineStrLen(prefix);
+	if (PipelineStrncmp(resource->id, prefix, prefixLength) != 0) {
 		return false;
 	}
 	int index = 0;
 	const char *suffix = resource->id + prefixLength;
 	if (*suffix != '\0') {
-		index = atoi(suffix);
+		index = PipelineAtoi(suffix);
 	}
 	if (outIndex) {
 		*outIndex = index;
@@ -357,7 +426,7 @@ static bool PipelineExecuteComputePass(
 
 	glExtUseProgram(s_graphicsComputeProgramId);
 	if (s_computePipelinePassUniformLocation >= 0) {
-		glUniform1i(s_computePipelinePassUniformLocation, s_activePipelinePassIndex);
+		glExtUniform1i(s_computePipelinePassUniformLocation, s_activePipelinePassIndex);
 	}
 
 	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
@@ -373,7 +442,7 @@ static bool PipelineExecuteComputePass(
 			case PipelineResourceAccessSampled:
 			case PipelineResourceAccessHistoryRead: {
 				GLuint samplerUnit = samplerUnitBase + samplerUnitCount;
-				glActiveTexture(GL_TEXTURE0 + samplerUnit);
+				glExtActiveTexture(GL_TEXTURE0 + samplerUnit);
 				glBindTexture(GL_TEXTURE_2D, textureId);
 				PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
 				boundSamplerUnits[numBoundSamplerUnits++] = samplerUnit;
@@ -424,18 +493,18 @@ static bool PipelineExecuteComputePass(
 			glExtBindImageTexture(boundImageUnits[i], 0, 0, GL_FALSE, 0, boundImageAccess[i], imageFormats[i]);
 		}
 		for (int i = 0; i < numBoundSamplerUnits; ++i) {
-			glActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
+			glExtActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
 			glBindTexture(GL_TEXTURE_2D, 0);
 		}
-		glActiveTexture(GL_TEXTURE0);
+		glExtActiveTexture(GL_TEXTURE0);
 		return false;
 	}
 
-	glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
-	glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
-	glUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
-	glUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
-	glUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
+	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
 
 	GLuint workGroupSizeX = s_graphicsComputeWorkGroupSize[0] > 0? (GLuint)s_graphicsComputeWorkGroupSize[0]: 1;
 	GLuint workGroupSizeY = s_graphicsComputeWorkGroupSize[1] > 0? (GLuint)s_graphicsComputeWorkGroupSize[1]: 1;
@@ -463,17 +532,17 @@ static bool PipelineExecuteComputePass(
 	if (numGroupsY == 0) numGroupsY = 1;
 	if (numGroupsZ == 0) numGroupsZ = 1;
 
-	glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+	glExtDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
 	glExtMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
 
 	for (int i = 0; i < numBoundImageUnits; ++i) {
 		glExtBindImageTexture(boundImageUnits[i], 0, 0, GL_FALSE, 0, boundImageAccess[i], imageFormats[i]);
 	}
 	for (int i = 0; i < numBoundSamplerUnits; ++i) {
-		glActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
+		glExtActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
-	glActiveTexture(GL_TEXTURE0);
+	glExtActiveTexture(GL_TEXTURE0);
 	glExtUseProgram(0);
 
 	return true;
@@ -493,7 +562,7 @@ static bool PipelineExecuteFragmentPass(
 
 	glExtUseProgram(fragmentProgramId);
 	if (s_fragmentPipelinePassUniformLocation >= 0) {
-		glUniform1i(s_fragmentPipelinePassUniformLocation, s_activePipelinePassIndex);
+		glExtUniform1i(s_fragmentPipelinePassUniformLocation, s_activePipelinePassIndex);
 	}
 
 	GLuint framebuffer = 0;
@@ -533,8 +602,8 @@ static bool PipelineExecuteFragmentPass(
 		return false;
 	}
 
-	glDrawBuffers(numDrawBuffers, drawBuffers);
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+	glExtDrawBuffers(numDrawBuffers, drawBuffers);
+	if (glExtCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 		glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glExtDeleteFramebuffers(1, &framebuffer);
 		return false;
@@ -580,20 +649,20 @@ static bool PipelineExecuteFragmentPass(
 		if (samplerUnit >= PIPELINE_MAX_BINDINGS_PER_PASS) {
 			samplerUnit = (GLuint)(PIPELINE_MAX_BINDINGS_PER_PASS - 1);
 		}
-		glActiveTexture(GL_TEXTURE0 + samplerUnit);
+		glExtActiveTexture(GL_TEXTURE0 + samplerUnit);
 		glBindTexture(GL_TEXTURE_2D, textureId);
 		PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
 		if (samplerUnit >= numBoundSamplerUnits) {
 			samplerUnits[numBoundSamplerUnits++] = samplerUnit;
 		}
 	}
-	glActiveTexture(GL_TEXTURE0);
+	glExtActiveTexture(GL_TEXTURE0);
 
-	glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
-	glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
-	glUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
-	glUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
-	glUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
+	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
 
 	GLfloat vertices[] = {
 		-1.0f, -1.0f,
@@ -601,20 +670,20 @@ static bool PipelineExecuteFragmentPass(
 		-1.0f,  1.0f,
 		 1.0f,  1.0f
 	};
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertices);
-	glEnableVertexAttribArray(0);
+	glExtVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertices);
+	glExtEnableVertexAttribArray(0);
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-	glDisableVertexAttribArray(0);
+	glExtDisableVertexAttribArray(0);
 
 	glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glExtDeleteFramebuffers(1, &framebuffer);
 	glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
 	for (int i = 0; i < numBoundSamplerUnits; ++i) {
-		glActiveTexture(GL_TEXTURE0 + samplerUnits[i]);
+		glExtActiveTexture(GL_TEXTURE0 + samplerUnits[i]);
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
-	glActiveTexture(GL_TEXTURE0);
+	glExtActiveTexture(GL_TEXTURE0);
 
 	if (enableFrameCountUniform) {
 		glExtUniform1i(1, frameCount);
@@ -639,7 +708,7 @@ static bool PipelineExecutePresentPass(
 	glExtGenFramebuffers(1, &readFramebuffer);
 	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
 	glExtFramebufferTexture(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, textureId, 0);
-	if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+	if (glExtCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 		glExtBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 		glExtDeleteFramebuffers(1, &readFramebuffer);
 		return false;
@@ -666,24 +735,6 @@ static bool PipelineExecutePresentPass(
 #define NUM_SOUND_BUFFER_SAMPLES_PER_DISPATCH	0x8000
 #define NUM_SOUND_BUFFER_BYTES					NUM_SOUND_BUFFER_SAMPLES * NUM_SOUND_CHANNELS * sizeof(SOUND_SAMPLE_TYPE)
 
-
-/*=============================================================================
-▼	各種リソースの取り込み
------------------------------------------------------------------------------*/
-#include "resource.cpp"
-
-
-/*=============================================================================
-▼	OpenGL 関数テーブル
------------------------------------------------------------------------------*/
-static void *s_glExtFunctions[NUM_GLEXT_FUNCTIONS];
-
-
-/*=============================================================================
-▼	各種構造体
------------------------------------------------------------------------------*/
-static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
-static GLuint s_graphicsComputeProgramId = 0;
 
 #pragma data_seg(".s_waveFormat")
 static /* const */ WAVEFORMATEX s_waveFormat = {
@@ -985,7 +1036,7 @@ entrypoint(
 		}
 	}
 	if (s_graphicsComputeProgramId != 0) {
-		s_computePipelinePassUniformLocation = glGetUniformLocation(
+		s_computePipelinePassUniformLocation = glExtGetUniformLocation(
 			s_graphicsComputeProgramId,
 			"g_pipelinePassIndex"
 		);
@@ -1005,7 +1056,7 @@ entrypoint(
 		/* GLuint program */	graphicsFsProgramId
 	);
 	if (graphicsFsProgramId != 0) {
-		s_fragmentPipelinePassUniformLocation = glGetUniformLocation(
+		s_fragmentPipelinePassUniformLocation = glExtGetUniformLocation(
 			graphicsFsProgramId,
 			"g_pipelinePassIndex"
 		);
@@ -1013,7 +1064,7 @@ entrypoint(
 		s_fragmentPipelinePassUniformLocation = -1;
 	}
 
-	memcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));
+	PipelineMemcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));
 	PipelineResetRuntimeResources();
 	PipelineEnsureResources(&s_pipelineDescription);
 
@@ -1091,7 +1142,7 @@ entrypoint(
 	} while (s_mmTime.u.sample < NUM_SOUND_BUFFER_AVAILABLE_SAMPLES);
 
 	if (s_graphicsComputeProgramId != 0) {
-		glDeleteProgram(s_graphicsComputeProgramId);
+		glExtDeleteProgram(s_graphicsComputeProgramId);
 		s_graphicsComputeProgramId = 0;
 	}
 	PipelineResetRuntimeResources();

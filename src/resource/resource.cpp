@@ -33,6 +33,9 @@ char g_concatenatedString_align0[] =
 #endif
 	"glDispatchCompute\0"			/* 頻出ワードを持たないので先に配置 */
 	"glUniform1i\0"					/* 頻出ワードを持たないので先に配置 */
+	"glUniform1f\0"					/* 頻出ワードを持たないので先に配置 */
+	"glUniform2f\0"					/* 頻出ワードを持たないので先に配置 */
+	"glUniform3i\0"					/* 頻出ワードを持たないので先に配置 */
 	"glBindImageTexture\0"			/* 頻出ワードを持たないので先に配置 */
 	"glMemoryBarrier\0"				/* 頻出ワードを持たないので先に配置 */
 #if ENABLE_MIPMAP_GENERATION
@@ -40,6 +43,9 @@ char g_concatenatedString_align0[] =
 #endif
 	"glCreateShaderProgramv\0"		/* Generate の ate が 既出ワード */
 	"glUseProgram\0"				/* Program が既出ワード */
+	"glGetUniformLocation\0"		/* Program が既出ワード */
+	"glGetProgramiv\0"				/* Program が既出ワード */
+	"glDeleteProgram\0"				/* Program が既出ワード */
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
 	#if PREFER_GL_TEX_STORAGE_2D
 	"glTexStorage2D\0"
@@ -47,25 +53,18 @@ char g_concatenatedString_align0[] =
 #endif
 	"glBufferStorage\0"				/* Storage が既出ワード */
 	"glMapBuffer\0"					/* Buffer が既出ワード */
-#if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
 	"glDrawBuffers\0"				/* Buffer が既出ワード */
-#endif
 	"glBindBufferBase\0"			/* Buffer が既出ワード */
-#if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
 	"glBindFramebuffer\0"			/* Bind と Buffer の uffer が既出ワード */
 	"glGenFramebuffers\0"			/* Framebuffer が既出ワード */
+	"glDeleteFramebuffers\0"		/* Framebuffer が既出ワード */
 	"glBlitNamedFramebuffer\0"		/* Framebuffer が既出ワード */
 	"glFramebufferTexture\0"		/* Framebuffer Tex が既出ワード */
-	#if (NUM_RENDER_TARGETS > 1)
 	"glActiveTexture\0"				/* Texture が既出ワード */
-	#endif
-#endif
-#ifdef _DEBUG
-	"glUniform2f\0"
-	"glGetUniformLocation\0"
-	"glGetProgramiv\0"
-	"glGetProgramInfoLog\0"
-#endif
+	"glCheckFramebufferStatus\0"	/* Framebuffer が既出ワード */
+	"glVertexAttribPointer\0"		/* Vertex が既出ワード */
+	"glEnableVertexAttribArray\0"	/* Vertex が既出ワード */
+	"glDisableVertexAttribArray\0"	/* Vertex が既出ワード */
 	"\xFF"			/* end mark */
 
 	/* 描画用シェーダ */
@@ -87,6 +86,9 @@ typedef enum {
 #endif
 	GlExtDispatchCompute,
 	GlExtUniform1i,
+	GlExtUniform1f,
+	GlExtUniform2f,
+	GlExtUniform3i,
 	GlExtBindImageTexture,
 	GlExtMemoryBarrier,
 #if ENABLE_MIPMAP_GENERATION
@@ -94,6 +96,9 @@ typedef enum {
 #endif
 	GlExtCreateShaderProgramv,
 	GlExtUseProgram,
+	GlExtGetUniformLocation,
+	GlExtGetProgramiv,
+	GlExtDeleteProgram,
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
 	#if PREFER_GL_TEX_STORAGE_2D
 	GlExtTexStorage2D,
@@ -101,51 +106,59 @@ typedef enum {
 #endif
 	GlExtBufferStorage,
 	GlExtMapBuffer,
-#if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
 	GlExtDrawBuffers,
-#endif
 	GlExtBindBufferBase,
-#if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
 	GlExtBindFramebuffer,
 	GlExtGenFramebuffers,
+	GlExtDeleteFramebuffers,
 	GlExtBlitNamedFramebuffer,
 	GlExtFramebufferTexture,
-	#if (NUM_RENDER_TARGETS > 1)
 	GlExtActiveTexture,
-	#endif
-#endif
-#ifdef _DEBUG
-	GlExtUniform2f,
-	GlExtGetUniformLocation,
-	GlExtGetProgramiv,
-	GlExtGetProgramInfoLog,
-#endif
+	GlExtCheckFramebufferStatus,
+	GlExtVertexAttribPointer,
+	GlExtEnableVertexAttribArray,
+	GlExtDisableVertexAttribArray,
 	NUM_GLEXT_FUNCTIONS
 } GlExt;
 
 /* GL 拡張関数 */
+#if ENABLE_SWAP_INTERVAL_CONTROL
 #define wglSwapIntervalEXT			((BOOL(WINAPI*)(int))           s_glExtFunctions[kWglSwapIntervalEXT])
+#endif
 #define glExtDispatchCompute		((PFNGLDISPATCHCOMPUTEPROC)     s_glExtFunctions[GlExtDispatchCompute])
 #define glExtUniform1i				((PFNGLUNIFORM1IPROC)           s_glExtFunctions[GlExtUniform1i])
+#define glExtUniform1f				((PFNGLUNIFORM1FPROC)           s_glExtFunctions[GlExtUniform1f])
+#define glExtUniform2f				((PFNGLUNIFORM2FPROC)           s_glExtFunctions[GlExtUniform2f])
+#define glExtUniform3i				((PFNGLUNIFORM3IPROC)           s_glExtFunctions[GlExtUniform3i])
 #define glExtBindImageTexture		((PFNGLBINDIMAGETEXTUREPROC)   s_glExtFunctions[GlExtBindImageTexture])
-#define glExtMemoryBarrier		((PFNGLMEMORYBARRIERPROC)        s_glExtFunctions[GlExtMemoryBarrier])
+#define glExtMemoryBarrier			((PFNGLMEMORYBARRIERPROC)       s_glExtFunctions[GlExtMemoryBarrier])
+#if ENABLE_MIPMAP_GENERATION
 #define glExtGenerateMipmap			((PFNGLGENERATEMIPMAPPROC)      s_glExtFunctions[GlExtGenerateMipmap])
+#endif
 #define glExtCreateShaderProgramv	((PFNGLCREATESHADERPROGRAMVPROC)s_glExtFunctions[GlExtCreateShaderProgramv])
 #define glExtUseProgram				((PFNGLUSEPROGRAMPROC)          s_glExtFunctions[GlExtUseProgram])
+#define glExtGetUniformLocation		((PFNGLGETUNIFORMLOCATIONPROC)  s_glExtFunctions[GlExtGetUniformLocation])
+#define glExtGetProgramiv			((PFNGLGETPROGRAMIVPROC)        s_glExtFunctions[GlExtGetProgramiv])
+#define glExtDeleteProgram			((PFNGLDELETEPROGRAMPROC)       s_glExtFunctions[GlExtDeleteProgram])
+#if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
+	#if PREFER_GL_TEX_STORAGE_2D
 #define glExtTexStorage2D			((PFNGLTEXSTORAGE2DPROC)        s_glExtFunctions[GlExtTexStorage2D])
+	#endif
+#endif
 #define glExtBufferStorage			((PFNGLBUFFERSTORAGEPROC)       s_glExtFunctions[GlExtBufferStorage])
 #define glExtMapBuffer				((PFNGLMAPBUFFERPROC)	        s_glExtFunctions[GlExtMapBuffer])
 #define glExtDrawBuffers			((PFNGLDRAWBUFFERSPROC)         s_glExtFunctions[GlExtDrawBuffers])
 #define glExtBindBufferBase			((PFNGLBINDBUFFERBASEPROC)      s_glExtFunctions[GlExtBindBufferBase])
 #define glExtBindFramebuffer		((PFNGLBINDFRAMEBUFFERPROC)     s_glExtFunctions[GlExtBindFramebuffer])
 #define glExtGenFramebuffers		((PFNGLGENFRAMEBUFFERSPROC)     s_glExtFunctions[GlExtGenFramebuffers])
+#define glExtDeleteFramebuffers		((PFNGLDELETEFRAMEBUFFERSPROC)  s_glExtFunctions[GlExtDeleteFramebuffers])
 #define glExtBlitNamedFramebuffer	((PFNGLBLITNAMEDFRAMEBUFFERPROC)s_glExtFunctions[GlExtBlitNamedFramebuffer])
 #define glExtFramebufferTexture		((PFNGLFRAMEBUFFERTEXTUREPROC)  s_glExtFunctions[GlExtFramebufferTexture])
 #define glExtActiveTexture			((PFNGLACTIVETEXTUREPROC)       s_glExtFunctions[GlExtActiveTexture])
-#define glExtUniform2f				((PFNGLUNIFORM2FPROC)           s_glExtFunctions[GlExtUniform2f])
-#define glExtGetUniformLocation		((PFNGLGETUNIFORMLOCATIONPROC)  s_glExtFunctions[GlExtGetUniformLocation])
-#define glExtGetProgramiv			((PFNGLGETPROGRAMIVPROC)        s_glExtFunctions[GlExtGetProgramiv])
-#define glExtGetProgramInfoLog		((PFNGLGETPROGRAMINFOLOGPROC)   s_glExtFunctions[GlExtGetProgramInfoLog])
+#define glExtCheckFramebufferStatus	((PFNGLCHECKFRAMEBUFFERSTATUSPROC)s_glExtFunctions[GlExtCheckFramebufferStatus])
+#define glExtVertexAttribPointer	((PFNGLVERTEXATTRIBPOINTERPROC) s_glExtFunctions[GlExtVertexAttribPointer])
+#define glExtEnableVertexAttribArray ((PFNGLENABLEVERTEXATTRIBARRAYPROC)s_glExtFunctions[GlExtEnableVertexAttribArray])
+#define glExtDisableVertexAttribArray ((PFNGLDISABLEVERTEXATTRIBARRAYPROC)s_glExtFunctions[GlExtDisableVertexAttribArray])
 
 
 

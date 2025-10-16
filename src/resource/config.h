@@ -43,6 +43,14 @@
 #define	USE_TINYIMPORT							ARG_USE_TINYIMPORT
 
 
+/* uniform の location */
+#define UNIFORM_LOCATION_WAVE_OUT_POS			0
+#define UNIFORM_LOCATION_FRAME_COUNT			1
+#define UNIFORM_LOCATION_TIME					2
+#define UNIFORM_LOCATION_RESO					3
+#define UNIFORM_LOCATION_MOUSE_BUTTONS			5
+
+
 /* glTexImage2D の代わりに glExtTexStorage2D を使うか */
 #define PREFER_GL_TEX_STORAGE_2D				1
 
