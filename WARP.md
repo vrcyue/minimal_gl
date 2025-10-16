@@ -107,6 +107,7 @@ MinimalGL uses a dual-pipeline approach:
 - `GraphicsUpdate` now interprets a `PipelineDescription`; when no custom pipeline is supplied it synthesizes the legacy {compute → fragment → present} sequence automatically.
 - Exported runtimes embed the same description via `pipeline_description.inl`, so `src/resource/main.cpp` replays the identical frame-graph instead of hard-coded ping-pong logic.
 - See `examples/pipeline_sample.json` for a reference that expresses a fragment → compute → fragment → present flow with ping-pong history access.
+- The editor exposes a `File → Pipeline Management...` dialog to load/save pipeline JSON files, apply the bundled sample, and clear the custom description without hand-editing project files.
 
 ### External Dependencies
 

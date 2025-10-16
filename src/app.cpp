@@ -88,6 +88,8 @@ static RenderSettings s_renderSettings = {
 };
 static PipelineDescription s_pipelineDescriptionForProject = {{0}};
 static bool s_pipelineDescriptionIsValid = false;
+static char s_pipelineLastFileName[MAX_PATH] = {0};
+static void AppPipelineSetLastFileNameInternal(const char *fileName);
 static struct PreferenceSettings {
 	bool enableAutoRestartByGraphicsShader;
 	bool enableAutoRestartBySoundShader;
@@ -1255,13 +1257,15 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 					jsonPipeline,
 					errorMessage,
 					sizeof(errorMessage)
-				)
+			)
 			) {
 				s_pipelineDescriptionForProject = pipelineDescription;
 				s_pipelineDescriptionIsValid = true;
+				AppPipelineSetLastFileNameInternal(NULL);
 				GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject);
 			} else {
 				s_pipelineDescriptionIsValid = false;
+				AppPipelineSetLastFileNameInternal(NULL);
 				GraphicsApplyPipelineDescription(NULL);
 				if (errorMessage[0] != '\0') {
 					AppErrorMessageBox(APP_NAME, "Failed to load pipeline: %s", errorMessage);
@@ -1272,6 +1276,7 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 			}
 		} else {
 			s_pipelineDescriptionIsValid = false;
+			AppPipelineSetLastFileNameInternal(NULL);
 			GraphicsApplyPipelineDescription(NULL);
 		}
 	}
@@ -1793,6 +1798,239 @@ static bool AppReloadSoundShader(){
 	}
 	return s_soundCreateShaderSucceeded;
 }
+
+/*=============================================================================
+▼	パイプライン管理
+-----------------------------------------------------------------------------*/
+static void AppPipelineSetErrorMessage(
+	char *errorMessage,
+	size_t errorMessageSizeInBytes,
+	const char *format,
+	...
+){
+	if (errorMessage == NULL || errorMessageSizeInBytes == 0) {
+		return;
+	}
+	va_list args;
+	va_start(args, format);
+	_vsnprintf_s(
+		errorMessage,
+		errorMessageSizeInBytes,
+		_TRUNCATE,
+		format,
+		args
+	);
+	va_end(args);
+}
+
+static void AppPipelineSetLastFileNameInternal(const char *fileName){
+	if (fileName == NULL) {
+		s_pipelineLastFileName[0] = '\0';
+		return;
+	}
+	strlcpy(s_pipelineLastFileName, fileName, sizeof(s_pipelineLastFileName));
+}
+
+bool AppPipelineHasCustomDescription(){
+	return s_pipelineDescriptionIsValid;
+}
+
+const PipelineDescription *AppPipelineGetProjectDescription(){
+	if (s_pipelineDescriptionIsValid == false) {
+		return NULL;
+	}
+	return &s_pipelineDescriptionForProject;
+}
+
+void AppPipelineClearDescription(){
+	PipelineDescriptionInit(&s_pipelineDescriptionForProject);
+	s_pipelineDescriptionIsValid = false;
+	AppPipelineSetLastFileNameInternal(NULL);
+	GraphicsApplyPipelineDescription(NULL);
+}
+
+bool AppPipelineLoadFromFile(
+	const char *fileName,
+	char *errorMessage,
+	size_t errorMessageSizeInBytes
+){
+	if (errorMessage != NULL && errorMessageSizeInBytes > 0) {
+		errorMessage[0] = '\0';
+	}
+
+	if (fileName == NULL || fileName[0] == '\0') {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Invalid file name."
+		);
+		return false;
+	}
+
+	bool result = false;
+	char *text = MallocReadTextFile(fileName);
+	if (text == NULL) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to read %s.",
+			fileName
+		);
+		return false;
+	}
+
+	cJSON *jsonRoot = cJSON_Parse(text);
+	PipelineDescription pipeline;
+	char pipelineError[512];
+	pipelineError[0] = '\0';
+
+	if (jsonRoot == NULL) {
+		const char *jsonError = cJSON_GetErrorPtr();
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to parse JSON (%s).",
+			jsonError != NULL ? jsonError : "unknown error"
+		);
+		goto Cleanup;
+	}
+
+	if (cJSON_IsObject(jsonRoot) == false) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"The pipeline file must contain a JSON object."
+		);
+		goto Cleanup;
+	}
+
+	PipelineDescriptionInit(&pipeline);
+	if (PipelineDescriptionDeserializeFromJson(
+			&pipeline,
+			jsonRoot,
+			pipelineError,
+			sizeof(pipelineError)
+		) == false
+	) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"%s",
+			(pipelineError[0] != '\0') ? pipelineError : "Failed to deserialize pipeline."
+		);
+		goto Cleanup;
+	}
+
+	s_pipelineDescriptionForProject = pipeline;
+	s_pipelineDescriptionIsValid = true;
+	AppPipelineSetLastFileNameInternal(fileName);
+	GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject);
+	result = true;
+
+Cleanup:
+	if (jsonRoot != NULL) {
+		cJSON_Delete(jsonRoot);
+	}
+	free(text);
+	return result;
+}
+
+bool AppPipelineSaveToFile(
+	const char *fileName,
+	char *errorMessage,
+	size_t errorMessageSizeInBytes
+){
+	if (errorMessage != NULL && errorMessageSizeInBytes > 0) {
+		errorMessage[0] = '\0';
+	}
+
+	if (fileName == NULL || fileName[0] == '\0') {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Invalid file name."
+		);
+		return false;
+	}
+
+	if (s_pipelineDescriptionIsValid == false) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"No custom pipeline is available."
+		);
+		return false;
+	}
+
+	cJSON *jsonRoot = PipelineDescriptionSerializeToJson(&s_pipelineDescriptionForProject);
+	if (jsonRoot == NULL) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to serialize pipeline."
+		);
+		return false;
+	}
+
+	char *jsonText = cJSON_Print(jsonRoot);
+	if (jsonText == NULL) {
+		cJSON_Delete(jsonRoot);
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to serialize pipeline."
+		);
+		return false;
+	}
+
+	bool result = false;
+	FILE *file = fopen(fileName, "wb");
+	if (file == NULL) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to open %s.",
+			fileName
+		);
+	} else {
+		fputs(jsonText, file);
+		fclose(file);
+		AppPipelineSetLastFileNameInternal(fileName);
+		result = true;
+	}
+
+	free(jsonText);
+	cJSON_Delete(jsonRoot);
+	return result;
+}
+
+bool AppPipelineApplySample(
+	char *errorMessage,
+	size_t errorMessageSizeInBytes
+){
+	char modulePath[MAX_PATH] = {0};
+	if (GetModuleFileName(NULL, modulePath, sizeof(modulePath)) == 0) {
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to locate executable path."
+		);
+		return false;
+	}
+
+	char moduleDir[MAX_PATH] = {0};
+	SplitDirectoryPathFromFilePath(moduleDir, sizeof(moduleDir), modulePath);
+
+	char samplePath[MAX_PATH] = {0};
+	GenerateCombinedPath(samplePath, sizeof(samplePath), moduleDir, "examples\\pipeline_sample.json");
+
+	return AppPipelineLoadFromFile(samplePath, errorMessage, errorMessageSizeInBytes);
+}
+
+const char *AppPipelineGetLastFileName(){
+	return s_pipelineLastFileName;
+}
+
 
 void AppGetDefaultDirectoryName(char *directoryName, size_t directoryNameSizeInBytes){
 	/*

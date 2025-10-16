@@ -171,6 +171,38 @@ const char *AppUserTexturesGetCurrentFileName(int userTextureIndex);
 /* ユーザーテクスチャ : テクスチャの削除 */
 bool AppUserTexturesDelete(int userTextureIndex);
 
+/* パイプライン : 現在のプロジェクトにカスタムパイプラインが設定されているか？ */
+bool AppPipelineHasCustomDescription();
+
+/* パイプライン : プロジェクトに設定されたパイプラインの取得（存在しない場合は NULL） */
+const PipelineDescription *AppPipelineGetProjectDescription();
+
+/* パイプライン : カスタムパイプラインを解除 */
+void AppPipelineClearDescription();
+
+/* パイプライン : JSON ファイルから読み込んで適用 */
+bool AppPipelineLoadFromFile(
+	const char *fileName,
+	char *errorMessage,
+	size_t errorMessageSizeInBytes
+);
+
+/* パイプライン : JSON ファイルへ保存 */
+bool AppPipelineSaveToFile(
+	const char *fileName,
+	char *errorMessage,
+	size_t errorMessageSizeInBytes
+);
+
+/* パイプライン : サンプル構成を適用 */
+bool AppPipelineApplySample(
+	char *errorMessage,
+	size_t errorMessageSizeInBytes
+);
+
+/* パイプライン : 最後に読み書きした JSON ファイル名を取得 */
+const char *AppPipelineGetLastFileName();
+
 
 /* カメラ設定 : 座標の設定 */
 void AppCameraSettingsSetPosition(const float vec3Pos[3]);

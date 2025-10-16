@@ -83,6 +83,26 @@ MinimalGL を使った PC 4K Intro 作成の簡単な流れは以下のように
 7. 完成  
 	念のために nVidia AMD Intel 各社の GPU 環境で動作テストしてください。
 
+# パイプラインサンプルの適用手順
+
+`File → Pipeline Management...` から専用ダイアログを開くことで、プロジェクトにカスタムパイプラインを適用できます。
+
+1. **ダイアログを開く**  
+	メインメニューの `File → Pipeline Management...` を選択します。現在のパイプライン状態とリソース／パスの一覧が表示されます。
+
+2. **サンプルパイプラインの読み込み**  
+	ダイアログ内の `Apply sample` を押すか、`Load...` から `examples/pipeline_sample.json` を選択すると、`scene → compute → composite → present` のサンプル構成がそのまま適用されます。読み込みに成功するとステータス欄に反映されます。
+
+3. **必要に応じて JSON を保存**  
+	現在のカスタムパイプラインを JSON として保存する場合は `Save...` を使用します。プロジェクトを通常どおりエクスポートするとパイプラインも一緒に保存されるため、手動保存は任意です。
+
+4. **シェーダを差し替え**  
+	サンプルパイプラインに合わせて、グラフィクス用には `examples/shaders/pipeline_demo/pipeline_graphics.glsl`、コンピュート用には `examples/shaders/pipeline_demo/pipeline_compute.glsl` を読み込みます。シェーダ内で `g_pipelinePassIndex` を参照している場合はパス 0/1/2 で動作を切り替えられます。
+
+5. **エクスポート**  
+	準備が整った状態で通常どおりエクスポートすると、`pipeline_description.inl` がサンプル構成で生成され、ランタイム実行ファイルでも同じパイプラインが適用されます。
+
+# 機能一覧
 
 # 機能一覧
 

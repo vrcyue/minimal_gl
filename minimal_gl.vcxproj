@@ -157,6 +157,7 @@
     <ClCompile Include="src\dialog_export_executable.cpp" />
     <ClCompile Include="src\dialog_gfx_uniforms.cpp" />
     <ClCompile Include="src\dialog_load_user_textures.cpp" />
+    <ClCompile Include="src\dialog_pipeline_management.cpp" />
     <ClCompile Include="src\dialog_preference_settings.cpp" />
     <ClCompile Include="src\dialog_preprocessor_definitions.cpp" />
     <ClCompile Include="src\dialog_record_image_sequence.cpp" />
@@ -198,6 +199,7 @@
     <ClInclude Include="src\dialog_export_executable.h" />
     <ClInclude Include="src\dialog_gfx_uniforms.h" />
     <ClInclude Include="src\dialog_load_user_textures.h" />
+    <ClInclude Include="src\dialog_pipeline_management.h" />
     <ClInclude Include="src\dialog_preference_settings.h" />
     <ClInclude Include="src\dialog_preprocessor_definitions.h" />
     <ClInclude Include="src\dialog_record_image_sequence.h" />

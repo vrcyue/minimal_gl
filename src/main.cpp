@@ -18,6 +18,7 @@
 #include "dialog_preference_settings.h"
 #include "dialog_render_settings.h"
 #include "dialog_load_user_textures.h"
+#include "dialog_pipeline_management.h"
 #include "dialog_gfx_uniforms.h"
 #include "dialog_snd_uniforms.h"
 #include "dialog_preprocessor_definitions.h"
@@ -427,6 +428,16 @@ static LRESULT CALLBACK MainWndProc(
 						if (GetSaveFileName(&ofn)) {
 							AppProjectExport(fileName);
 						}
+					}
+					return 0;
+				} break;
+
+				/* パイプライン管理 */
+				case IDM_PIPELINE_MANAGEMENT: {
+					if (s_fullScreen) {
+						ToggleFullScreen();
+					} else {
+						DialogPipelineManagement();
 					}
 					return 0;
 				} break;
