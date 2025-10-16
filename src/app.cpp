@@ -26,6 +26,7 @@
 #include "dialog_confirm_over_write.h"
 #include "tiny_vmath.h"
 #include "app.h"
+#include "pipeline_description.h"
 
 #include "resource/resource.h"
 
@@ -85,6 +86,8 @@ static RenderSettings s_renderSettings = {
 	/* bool enableSwapIntervalControl; */	true,
 	/* SwapInterval swapInterval; */		DEFAULT_SWAP_INTERVAL,
 };
+static PipelineDescription s_pipelineDescriptionForProject = {{0}};
+static bool s_pipelineDescriptionIsValid = false;
 static struct PreferenceSettings {
 	bool enableAutoRestartByGraphicsShader;
 	bool enableAutoRestartBySoundShader;
@@ -1242,6 +1245,37 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 		JsonGetAsInt (jsonRoot, "/renderSettings/swapInterval",                (int *)&s_renderSettings.swapInterval, DEFAULT_SWAP_INTERVAL);
 	}
 	{
+		cJSON *jsonPipeline = cJSONUtils_GetPointer(jsonRoot, "/pipeline");
+		if (jsonPipeline != NULL && cJSON_IsObject(jsonPipeline)) {
+			PipelineDescription pipelineDescription;
+			PipelineDescriptionInit(&pipelineDescription);
+			char errorMessage[512] = {0};
+			if (PipelineDescriptionDeserializeFromJson(
+					&pipelineDescription,
+					jsonPipeline,
+					errorMessage,
+					sizeof(errorMessage)
+				)
+			) {
+				s_pipelineDescriptionForProject = pipelineDescription;
+				s_pipelineDescriptionIsValid = true;
+				GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject);
+			} else {
+				s_pipelineDescriptionIsValid = false;
+				GraphicsApplyPipelineDescription(NULL);
+				if (errorMessage[0] != '\0') {
+					AppErrorMessageBox(APP_NAME, "Failed to load pipeline: %s", errorMessage);
+				} else {
+					AppErrorMessageBox(APP_NAME, "Failed to load pipeline.");
+				}
+				result = false;
+			}
+		} else {
+			s_pipelineDescriptionIsValid = false;
+			GraphicsApplyPipelineDescription(NULL);
+		}
+	}
+	{
 		JsonGetAsBool(jsonRoot, "/preferenceSettings/enableAutoRestartByGraphicsShader", &s_preferenceSettings.enableAutoRestartByGraphicsShader, true);
 		JsonGetAsBool(jsonRoot, "/preferenceSettings/enableAutoRestartBySoundShader",    &s_preferenceSettings.enableAutoRestartBySoundShader, true);
 	}
@@ -1452,6 +1486,12 @@ static void AppProjectSerializeToJson(cJSON *jsonRoot, const char *projectBasePa
 		cJSON_AddNumberToObject(jsonSettings, "textureWrap",                s_renderSettings.textureWrap);
 		cJSON_AddBoolToObject  (jsonSettings, "enableSwapIntervalControl",  s_renderSettings.enableSwapIntervalControl);
 		cJSON_AddNumberToObject(jsonSettings, "swapInterval",               s_renderSettings.swapInterval);
+	}
+	if (s_pipelineDescriptionIsValid) {
+		cJSON *jsonPipeline = PipelineDescriptionSerializeToJson(&s_pipelineDescriptionForProject);
+		if (jsonPipeline != NULL) {
+			cJSON_AddItemToObject(jsonRoot, "pipeline", jsonPipeline);
+		}
 	}
 	{
 		cJSON *jsonSettings = cJSON_AddObjectToObject(jsonRoot, "preferenceSettings");
@@ -2196,6 +2236,9 @@ bool AppInitialize(int argc, char **argv){
 		AppErrorMessageBox(APP_NAME, "GraphicsInitialize() failed.");
 		return false;
 	}
+	PipelineDescriptionInit(&s_pipelineDescriptionForProject);
+	s_pipelineDescriptionIsValid = false;
+	GraphicsApplyPipelineDescription(NULL);
 	AppOpenDefaultComputeShader();
 	AppOpenDefaultGraphicsShader();
 	SoundRestartWaveOut();

@@ -9,6 +9,8 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "config.h"
 
@@ -18,13 +20,643 @@
 
 
 /* 決め打ちのリソースハンドル */
-#define ASSUMED_SOUND_SSBO											1
-#define ASSUMED_FRAME_BUFFER_FBO									1
-#define ASSUMED_MRT1_TEXTURE(frameBufferIndex)						((frameBufferIndex) + 1)
-#define ASSUMED_MRT_TEXTURE(frameBufferIndex, renderTargetIndex)	((frameBufferIndex) + (renderTargetIndex) * 2 + 1)
-#define AVOID_GL_RUNTIME_ERROR_AND_START_FROM_ZERO_FRAME			1
+#define ASSUMED_SOUND_SSBO													1
 
-#define COMPUTE_TEXTURE_START_INDEX					(4)
+#define COMPUTE_TEXTURE_START_INDEX				(4)
+
+#define PIPELINE_MAX_RESOURCES				(16)
+#define PIPELINE_MAX_PASSES				(16)
+#define PIPELINE_MAX_BINDINGS_PER_PASS		(8)
+#define PIPELINE_MAX_HISTORY_LENGTH		(4)
+#define PIPELINE_MAX_RESOURCE_ID_LENGTH	(64)
+#define PIPELINE_MAX_PASS_NAME_LENGTH		(64)
+#define PIPELINE_MAX_SHADER_PATH_LENGTH	(MAX_PATH)
+
+typedef enum {
+	PixelFormatUnorm8Rgba,
+	PixelFormatFp16Rgba,
+	PixelFormatFp32Rgba,
+} PixelFormat;
+
+typedef enum {
+	TextureFilterNearest,
+	TextureFilterLinear,
+} TextureFilter;
+
+typedef enum {
+	TextureWrapRepeat,
+	TextureWrapClampToEdge,
+	TextureWrapMirroredRepeat,
+} TextureWrap;
+
+typedef enum {
+	PipelinePassTypeFragment,
+	PipelinePassTypeCompute,
+	PipelinePassTypePresent,
+} PipelinePassType;
+
+typedef enum {
+	PipelineResourceAccessSampled,
+	PipelineResourceAccessImageRead,
+	PipelineResourceAccessImageWrite,
+	PipelineResourceAccessHistoryRead,
+	PipelineResourceAccessColorAttachment,
+} PipelineResourceAccess;
+
+typedef enum {
+	PipelineResolutionModeFramebuffer,
+	PipelineResolutionModeFixed,
+} PipelineResolutionMode;
+
+typedef struct {
+	PipelineResolutionMode mode;
+	int width;
+	int height;
+} PipelineResourceResolution;
+
+typedef struct {
+	char id[PIPELINE_MAX_RESOURCE_ID_LENGTH];
+	PixelFormat pixelFormat;
+	PipelineResourceResolution resolution;
+	int historyLength;
+	TextureFilter textureFilter;
+	TextureWrap textureWrap;
+	GLuint glTextureIds[PIPELINE_MAX_HISTORY_LENGTH];
+} PipelineResource;
+
+typedef struct {
+	int resourceIndex;
+	PipelineResourceAccess access;
+	int historyOffset;
+} PipelineResourceBinding;
+
+typedef struct {
+	bool enableColorClear;
+	float clearColor[4];
+	bool enableDepthClear;
+	float clearDepth;
+} PipelinePassClear;
+
+typedef struct {
+	char name[PIPELINE_MAX_PASS_NAME_LENGTH];
+	PipelinePassType type;
+	char shaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
+	GLuint programId;
+	PipelineResourceBinding inputs[PIPELINE_MAX_BINDINGS_PER_PASS];
+	int numInputs;
+	PipelineResourceBinding outputs[PIPELINE_MAX_BINDINGS_PER_PASS];
+	int numOutputs;
+	PipelinePassClear clear;
+	bool overrideWorkGroupSize;
+	GLuint workGroupSize[3];
+} PipelinePass;
+
+typedef struct PipelineDescription {
+	PipelineResource resources[PIPELINE_MAX_RESOURCES];
+	int numResources;
+	PipelinePass passes[PIPELINE_MAX_PASSES];
+	int numPasses;
+} PipelineDescription;
+
+#include "pipeline_description.inl"
+
+typedef struct {
+	GLuint textureIds[PIPELINE_MAX_HISTORY_LENGTH];
+	int width;
+	int height;
+	PixelFormat pixelFormat;
+	int historyLength;
+	bool initialized;
+} PipelineRuntimeResourceState;
+
+static PipelineDescription s_pipelineDescription = {0};
+static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESOURCES] = {{0}};
+static int s_activePipelinePassIndex = -1;
+static GLint s_fragmentPipelinePassUniformLocation = -1;
+static GLint s_computePipelinePassUniformLocation = -1;
+
+static void PipelineDeleteRuntimeResource(PipelineRuntimeResourceState *state){
+	if (state == NULL) return;
+	if (state->initialized == false) return;
+	for (int historyIndex = 0; historyIndex < PIPELINE_MAX_HISTORY_LENGTH; ++historyIndex) {
+		if (state->textureIds[historyIndex] != 0) {
+			glDeleteTextures(1, &state->textureIds[historyIndex]);
+			state->textureIds[historyIndex] = 0;
+		}
+	}
+	state->initialized = false;
+	state->width = 0;
+	state->height = 0;
+	state->pixelFormat = PixelFormatUnorm8Rgba;
+	state->historyLength = 0;
+}
+
+static void PipelineResetRuntimeResources(void){
+	for (int resourceIndex = 0; resourceIndex < PIPELINE_MAX_RESOURCES; ++resourceIndex) {
+		PipelineDeleteRuntimeResource(&s_pipelineRuntimeResources[resourceIndex]);
+	}
+}
+
+static void PipelineGetPixelFormatInfo(PixelFormat pixelFormat, GLenum *internalformat, GLenum *format, GLenum *type){
+	GLenum internal = GL_RGBA8;
+	GLenum fmt = GL_RGBA;
+	GLenum tp = GL_UNSIGNED_BYTE;
+	switch (pixelFormat) {
+		default:
+		case PixelFormatUnorm8Rgba: {
+			internal = GL_RGBA8;
+			fmt = GL_RGBA;
+			tp = GL_UNSIGNED_BYTE;
+		} break;
+		case PixelFormatFp16Rgba: {
+			internal = GL_RGBA16F;
+			fmt = GL_RGBA;
+			tp = GL_HALF_FLOAT;
+		} break;
+		case PixelFormatFp32Rgba: {
+			internal = GL_RGBA32F;
+			fmt = GL_RGBA;
+			tp = GL_FLOAT;
+		} break;
+	}
+	if (internalformat) *internalformat = internal;
+	if (format) *format = fmt;
+	if (type) *type = tp;
+}
+
+static void PipelineSetTextureSampler(GLenum target, TextureFilter filter, TextureWrap wrap, bool enableMipmap){
+	GLint minFilter = GL_LINEAR;
+	GLint magFilter = GL_LINEAR;
+	switch (filter) {
+		case TextureFilterNearest: {
+			minFilter = enableMipmap? GL_NEAREST_MIPMAP_NEAREST: GL_NEAREST;
+			magFilter = GL_NEAREST;
+		} break;
+		case TextureFilterLinear:
+		default: {
+			minFilter = enableMipmap? GL_LINEAR_MIPMAP_LINEAR: GL_LINEAR;
+			magFilter = GL_LINEAR;
+		} break;
+	}
+	GLint wrapParam = GL_REPEAT;
+	switch (wrap) {
+		case TextureWrapRepeat: {
+			wrapParam = GL_REPEAT;
+		} break;
+		case TextureWrapClampToEdge: {
+			wrapParam = GL_CLAMP_TO_EDGE;
+		} break;
+		case TextureWrapMirroredRepeat: {
+			wrapParam = GL_MIRRORED_REPEAT;
+		} break;
+		default: {
+			wrapParam = GL_REPEAT;
+		} break;
+	}
+	glTexParameteri(target, GL_TEXTURE_MIN_FILTER, minFilter);
+	glTexParameteri(target, GL_TEXTURE_MAG_FILTER, magFilter);
+	glTexParameteri(target, GL_TEXTURE_WRAP_S, wrapParam);
+	glTexParameteri(target, GL_TEXTURE_WRAP_T, wrapParam);
+	glTexParameteri(target, GL_TEXTURE_WRAP_R, wrapParam);
+}
+
+static void PipelineCreateOrResizeResource(
+	PipelineRuntimeResourceState *state,
+	const PipelineResource *resource
+){
+	if (state == NULL || resource == NULL) return;
+
+	int historyLength = resource->historyLength;
+	if (historyLength <= 0) historyLength = 1;
+	if (historyLength > PIPELINE_MAX_HISTORY_LENGTH) {
+		historyLength = PIPELINE_MAX_HISTORY_LENGTH;
+	}
+
+	int width = (resource->resolution.mode == PipelineResolutionModeFixed)? resource->resolution.width: SCREEN_WIDTH;
+	int height = (resource->resolution.mode == PipelineResolutionModeFixed)? resource->resolution.height: SCREEN_HEIGHT;
+	if (width <= 0) width = SCREEN_WIDTH;
+	if (height <= 0) height = SCREEN_HEIGHT;
+
+	bool needsRecreate =
+		state->initialized == false
+	||	state->width != width
+	||	state->height != height
+	||	state->pixelFormat != resource->pixelFormat
+	||	state->historyLength != historyLength;
+
+	if (needsRecreate) {
+		PipelineDeleteRuntimeResource(state);
+
+		GLenum internalformat = GL_RGBA8;
+		GLenum format = GL_RGBA;
+		GLenum type = GL_UNSIGNED_BYTE;
+		PipelineGetPixelFormatInfo(resource->pixelFormat, &internalformat, &format, &type);
+
+		glGenTextures(historyLength, state->textureIds);
+		for (int historyIndex = 0; historyIndex < historyLength; ++historyIndex) {
+			glBindTexture(GL_TEXTURE_2D, state->textureIds[historyIndex]);
+			glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, format, type, NULL);
+			PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		state->initialized = true;
+		state->width = width;
+		state->height = height;
+		state->pixelFormat = resource->pixelFormat;
+		state->historyLength = historyLength;
+	} else {
+		for (int historyIndex = 0; historyIndex < state->historyLength; ++historyIndex) {
+			glBindTexture(GL_TEXTURE_2D, state->textureIds[historyIndex]);
+			PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+}
+
+static void PipelineEnsureResources(const PipelineDescription *pipeline){
+	if (pipeline == NULL) return;
+	for (int resourceIndex = 0; resourceIndex < pipeline->numResources; ++resourceIndex) {
+		PipelineCreateOrResizeResource(&s_pipelineRuntimeResources[resourceIndex], &pipeline->resources[resourceIndex]);
+	}
+}
+
+static GLuint PipelineAcquireResourceTexture(
+	int resourceIndex,
+	int frameCount,
+	int historyOffset
+){
+	if (resourceIndex < 0 || resourceIndex >= PIPELINE_MAX_RESOURCES) {
+		return 0;
+	}
+	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
+	if (state->initialized == false || state->historyLength <= 0) {
+		return 0;
+	}
+
+	int historyLength = state->historyLength;
+	int baseIndex = historyLength > 0 ? (frameCount % historyLength) : 0;
+	if (baseIndex < 0) {
+		baseIndex += historyLength;
+	}
+	int resolvedIndex = baseIndex + historyOffset;
+	while (resolvedIndex < 0) {
+		resolvedIndex += historyLength;
+	}
+	if (historyLength > 0) {
+		resolvedIndex %= historyLength;
+	}
+	if (resolvedIndex < 0 || resolvedIndex >= historyLength) {
+		resolvedIndex = baseIndex;
+	}
+	return state->textureIds[resolvedIndex];
+}
+
+static bool PipelineParseLegacyResourceIndex(
+	const PipelineResource *resource,
+	const char *prefix,
+	int *outIndex
+){
+	if (resource == NULL || prefix == NULL) return false;
+	size_t prefixLength = strlen(prefix);
+	if (strncmp(resource->id, prefix, prefixLength) != 0) {
+		return false;
+	}
+	int index = 0;
+	const char *suffix = resource->id + prefixLength;
+	if (*suffix != '\0') {
+		index = atoi(suffix);
+	}
+	if (outIndex) {
+		*outIndex = index;
+	}
+	return true;
+}
+
+static bool PipelineExecuteComputePass(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	int frameCount,
+	int waveOutPos,
+	float timeInSeconds
+){
+	if (pipeline == NULL || pass == NULL) return false;
+	if (s_graphicsComputeProgramId == 0) return false;
+
+	GLenum defaultInternalformat = GL_RGBA8;
+	PipelineGetPixelFormatInfo(PixelFormatUnorm8Rgba, &defaultInternalformat, NULL, NULL);
+
+	GLuint samplerUnitBase = COMPUTE_TEXTURE_START_INDEX;
+	GLuint samplerUnitCount = 0;
+	GLuint boundSamplerUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundSamplerUnits = 0;
+	GLenum imageFormats[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	GLuint boundImageUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	GLenum boundImageAccess[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundImageUnits = 0;
+
+	glExtUseProgram(s_graphicsComputeProgramId);
+	if (s_computePipelinePassUniformLocation >= 0) {
+		glUniform1i(s_computePipelinePassUniformLocation, s_activePipelinePassIndex);
+	}
+
+	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+		const PipelineResourceBinding *binding = &pass->inputs[inputIndex];
+		GLuint textureId = PipelineAcquireResourceTexture(binding->resourceIndex, frameCount, binding->historyOffset);
+		const PipelineResource *resource = &pipeline->resources[binding->resourceIndex];
+		if (textureId == 0 || resource == NULL) {
+			return false;
+		}
+		GLenum internalformat = defaultInternalformat;
+		PipelineGetPixelFormatInfo(resource->pixelFormat, &internalformat, NULL, NULL);
+		switch (binding->access) {
+			case PipelineResourceAccessSampled:
+			case PipelineResourceAccessHistoryRead: {
+				GLuint samplerUnit = samplerUnitBase + samplerUnitCount;
+				glActiveTexture(GL_TEXTURE0 + samplerUnit);
+				glBindTexture(GL_TEXTURE_2D, textureId);
+				PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+				boundSamplerUnits[numBoundSamplerUnits++] = samplerUnit;
+				++samplerUnitCount;
+			} break;
+			case PipelineResourceAccessImageRead: {
+				GLenum format = internalformat;
+				glExtBindImageTexture(numBoundImageUnits, textureId, 0, GL_FALSE, 0, GL_READ_ONLY, format);
+				boundImageUnits[numBoundImageUnits] = numBoundImageUnits;
+				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
+				imageFormats[numBoundImageUnits] = format;
+				++numBoundImageUnits;
+			} break;
+			default: {
+				return false;
+			} break;
+		}
+	}
+
+	bool hasWritableOutput = false;
+	for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
+		const PipelineResourceBinding *binding = &pass->outputs[outputIndex];
+		GLuint textureId = PipelineAcquireResourceTexture(binding->resourceIndex, frameCount, binding->historyOffset);
+		const PipelineResource *resource = &pipeline->resources[binding->resourceIndex];
+		if (textureId == 0 || resource == NULL) {
+			return false;
+		}
+		GLenum internalformat = defaultInternalformat;
+		PipelineGetPixelFormatInfo(resource->pixelFormat, &internalformat, NULL, NULL);
+		switch (binding->access) {
+			case PipelineResourceAccessImageWrite: {
+				int imageUnit = numBoundImageUnits;
+				glExtBindImageTexture(imageUnit, textureId, 0, GL_FALSE, 0, GL_WRITE_ONLY, internalformat);
+				boundImageUnits[numBoundImageUnits] = imageUnit;
+				boundImageAccess[numBoundImageUnits] = GL_WRITE_ONLY;
+				imageFormats[numBoundImageUnits] = internalformat;
+				++numBoundImageUnits;
+				hasWritableOutput = true;
+			} break;
+			default: {
+				return false;
+			} break;
+		}
+	}
+
+	if (hasWritableOutput == false) {
+		for (int i = 0; i < numBoundImageUnits; ++i) {
+			glExtBindImageTexture(boundImageUnits[i], 0, 0, GL_FALSE, 0, boundImageAccess[i], imageFormats[i]);
+		}
+		for (int i = 0; i < numBoundSamplerUnits; ++i) {
+			glActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+		glActiveTexture(GL_TEXTURE0);
+		return false;
+	}
+
+	glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	glUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+	glUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
+	glUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+
+	GLuint workGroupSizeX = s_graphicsComputeWorkGroupSize[0] > 0? (GLuint)s_graphicsComputeWorkGroupSize[0]: 1;
+	GLuint workGroupSizeY = s_graphicsComputeWorkGroupSize[1] > 0? (GLuint)s_graphicsComputeWorkGroupSize[1]: 1;
+	GLuint workGroupSizeZ = s_graphicsComputeWorkGroupSize[2] > 0? (GLuint)s_graphicsComputeWorkGroupSize[2]: 1;
+	if (pass->overrideWorkGroupSize) {
+		if (pass->workGroupSize[0] > 0) workGroupSizeX = pass->workGroupSize[0];
+		if (pass->workGroupSize[1] > 0) workGroupSizeY = pass->workGroupSize[1];
+		if (pass->workGroupSize[2] > 0) workGroupSizeZ = pass->workGroupSize[2];
+	}
+
+	GLuint targetWidth = SCREEN_WIDTH;
+	GLuint targetHeight = SCREEN_HEIGHT;
+	if (pass->numOutputs > 0) {
+		const PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[pass->outputs[0].resourceIndex];
+		if (state->initialized) {
+			targetWidth = (GLuint)state->width;
+			targetHeight = (GLuint)state->height;
+		}
+	}
+
+	GLuint numGroupsX = (targetWidth + workGroupSizeX - 1) / workGroupSizeX;
+	GLuint numGroupsY = (targetHeight + workGroupSizeY - 1) / workGroupSizeY;
+	GLuint numGroupsZ = (1 + workGroupSizeZ - 1) / workGroupSizeZ;
+	if (numGroupsX == 0) numGroupsX = 1;
+	if (numGroupsY == 0) numGroupsY = 1;
+	if (numGroupsZ == 0) numGroupsZ = 1;
+
+	glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+	glExtMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
+
+	for (int i = 0; i < numBoundImageUnits; ++i) {
+		glExtBindImageTexture(boundImageUnits[i], 0, 0, GL_FALSE, 0, boundImageAccess[i], imageFormats[i]);
+	}
+	for (int i = 0; i < numBoundSamplerUnits; ++i) {
+		glActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	glActiveTexture(GL_TEXTURE0);
+	glExtUseProgram(0);
+
+	return true;
+}
+
+static bool PipelineExecuteFragmentPass(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	int frameCount,
+	int waveOutPos,
+	float timeInSeconds,
+	GLuint fragmentProgramId,
+	bool enableFrameCountUniform
+){
+	if (pipeline == NULL || pass == NULL) return false;
+	if (fragmentProgramId == 0) return false;
+
+	glExtUseProgram(fragmentProgramId);
+	if (s_fragmentPipelinePassUniformLocation >= 0) {
+		glUniform1i(s_fragmentPipelinePassUniformLocation, s_activePipelinePassIndex);
+	}
+
+	GLuint framebuffer = 0;
+	glExtGenFramebuffers(1, &framebuffer);
+	glExtBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+	GLenum drawBuffers[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numDrawBuffers = 0;
+	GLuint targetWidth = SCREEN_WIDTH;
+	GLuint targetHeight = SCREEN_HEIGHT;
+
+	for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
+		const PipelineResourceBinding *binding = &pass->outputs[outputIndex];
+		if (binding->access != PipelineResourceAccessColorAttachment) {
+			continue;
+		}
+		GLuint textureId = PipelineAcquireResourceTexture(binding->resourceIndex, frameCount, binding->historyOffset);
+		PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[binding->resourceIndex];
+		if (textureId == 0 || state->initialized == false) {
+			glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glExtDeleteFramebuffers(1, &framebuffer);
+			return false;
+		}
+		if (numDrawBuffers == 0) {
+			targetWidth = (GLuint)state->width;
+			targetHeight = (GLuint)state->height;
+		}
+		GLenum attachment = GL_COLOR_ATTACHMENT0 + numDrawBuffers;
+		glExtFramebufferTexture(GL_FRAMEBUFFER, attachment, textureId, 0);
+		drawBuffers[numDrawBuffers] = attachment;
+		++numDrawBuffers;
+	}
+
+	if (numDrawBuffers == 0) {
+		glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glExtDeleteFramebuffers(1, &framebuffer);
+		return false;
+	}
+
+	glDrawBuffers(numDrawBuffers, drawBuffers);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glExtDeleteFramebuffers(1, &framebuffer);
+		return false;
+	}
+
+	glViewport(0, 0, targetWidth, targetHeight);
+
+	if (pass->clear.enableColorClear) {
+		glClearColor(
+			pass->clear.clearColor[0],
+			pass->clear.clearColor[1],
+			pass->clear.clearColor[2],
+			pass->clear.clearColor[3]
+		);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+
+	GLuint samplerUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundSamplerUnits = 0;
+	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+		const PipelineResourceBinding *binding = &pass->inputs[inputIndex];
+		GLuint textureId = PipelineAcquireResourceTexture(binding->resourceIndex, frameCount, binding->historyOffset);
+		const PipelineResource *resource = &pipeline->resources[binding->resourceIndex];
+		if (textureId == 0 || resource == NULL) {
+			glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glExtDeleteFramebuffers(1, &framebuffer);
+			return false;
+		}
+		if (binding->access != PipelineResourceAccessSampled && binding->access != PipelineResourceAccessHistoryRead) {
+			continue;
+		}
+		GLuint samplerUnit = numBoundSamplerUnits;
+		int legacyIndex = 0;
+		if (PipelineParseLegacyResourceIndex(resource, "legacy_mrt", &legacyIndex)) {
+			samplerUnit = (GLuint)legacyIndex;
+		}
+		else if (PipelineParseLegacyResourceIndex(resource, "legacy_compute", &legacyIndex)) {
+			samplerUnit = COMPUTE_TEXTURE_START_INDEX + (GLuint)legacyIndex;
+		}
+		else {
+			samplerUnit = (GLuint)(numBoundSamplerUnits);
+		}
+		if (samplerUnit >= PIPELINE_MAX_BINDINGS_PER_PASS) {
+			samplerUnit = (GLuint)(PIPELINE_MAX_BINDINGS_PER_PASS - 1);
+		}
+		glActiveTexture(GL_TEXTURE0 + samplerUnit);
+		glBindTexture(GL_TEXTURE_2D, textureId);
+		PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+		if (samplerUnit >= numBoundSamplerUnits) {
+			samplerUnits[numBoundSamplerUnits++] = samplerUnit;
+		}
+	}
+	glActiveTexture(GL_TEXTURE0);
+
+	glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	glUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+	glUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
+	glUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+
+	GLfloat vertices[] = {
+		-1.0f, -1.0f,
+		 1.0f, -1.0f,
+		-1.0f,  1.0f,
+		 1.0f,  1.0f
+	};
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertices);
+	glEnableVertexAttribArray(0);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glDisableVertexAttribArray(0);
+
+	glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glExtDeleteFramebuffers(1, &framebuffer);
+	glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+	for (int i = 0; i < numBoundSamplerUnits; ++i) {
+		glActiveTexture(GL_TEXTURE0 + samplerUnits[i]);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	glActiveTexture(GL_TEXTURE0);
+
+	if (enableFrameCountUniform) {
+		glExtUniform1i(1, frameCount);
+	}
+
+	return true;
+}
+
+static bool PipelineExecutePresentPass(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	int frameCount
+){
+	if (pipeline == NULL || pass == NULL) return false;
+	if (pass->numInputs <= 0) return false;
+	GLuint textureId = PipelineAcquireResourceTexture(pass->inputs[0].resourceIndex, frameCount, pass->inputs[0].historyOffset);
+	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[pass->inputs[0].resourceIndex];
+	if (textureId == 0 || state->initialized == false) {
+		return false;
+	}
+	GLuint readFramebuffer = 0;
+	glExtGenFramebuffers(1, &readFramebuffer);
+	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
+	glExtFramebufferTexture(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, textureId, 0);
+	if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		glExtBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glExtDeleteFramebuffers(1, &readFramebuffer);
+		return false;
+	}
+	glExtBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glExtBlitNamedFramebuffer(
+		readFramebuffer,
+		0,
+		0, 0, state->width, state->height,
+		0, 0, SCREEN_WIDTH, SCREEN_HEIGHT,
+		GL_COLOR_BUFFER_BIT,
+		GL_NEAREST
+	);
+	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glExtDeleteFramebuffers(1, &readFramebuffer);
+	return true;
+}
 
 /* サウンドレンダリング先バッファの番号 */
 #define BUFFER_INDEX_FOR_SOUND_OUTPUT			0
@@ -50,7 +682,6 @@ static void *s_glExtFunctions[NUM_GLEXT_FUNCTIONS];
 /*=============================================================================
 ▼	各種構造体
 -----------------------------------------------------------------------------*/
-static GLuint s_graphicsComputeTextures[2][NUM_RENDER_TARGETS] = {{0}};
 static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
 static GLuint s_graphicsComputeProgramId = 0;
 
@@ -142,106 +773,6 @@ static DEVMODE s_screenSettings = {
 	/* int32_t dmPanningWidth */	0,				/* unused */
 	/* int32_t dmPanningHeight */	0				/* unused */
 };
-
-
-/*=============================================================================
-▼	サンプラの設定
------------------------------------------------------------------------------*/
-static __forceinline void
-SetTextureSampler(
-){
-#if (TEXTURE_FILTER == TEXTURE_FILTER_NEAREST)
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_MIN_FILTER,
-		/* GLint param */	ENABLE_MIPMAP_GENERATION? GL_NEAREST_MIPMAP_NEAREST: GL_NEAREST
-	);
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_MAG_FILTER,
-		/* GLint param */	GL_NEAREST
-	);
-#elif (TEXTURE_FILTER == TEXTURE_FILTER_LINEAR)
-	/*
-		デフォルトで LINEAR なので設定省略可能。
-		しかし GL_TEXTURE_MIN_FILTER の設定は省略できない。
-	*/
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_MIN_FILTER,
-		/* GLint param */	ENABLE_MIPMAP_GENERATION? GL_LINEAR_MIPMAP_LINEAR: GL_LINEAR
-	);
-#else
-#	error
-#endif
-
-#if (TEXTURE_WRAP == TEXTURE_WRAP_REPEAT)
-	/* デフォルトで REPEAT なので設定不要 */
-#elif (TEXTURE_WRAP == TEXTURE_WRAP_CLAMP_TO_EDGE)
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_WRAP_S,
-		/* GLint param */	GL_CLAMP_TO_EDGE
-	);
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_WRAP_T,
-		/* GLint param */	GL_CLAMP_TO_EDGE
-	);
-#elif (TEXTURE_WRAP == TEXTURE_WRAP_MIRRORED_REPEAT)
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_WRAP_S,
-		/* GLint param */	GL_MIRRORED_REPEAT
-	);
-	glTexParameteri(
-		/* GLenum target */	GL_TEXTURE_2D,
-		/* GLenum pname */	GL_TEXTURE_WRAP_T,
-		/* GLint param */	GL_MIRRORED_REPEAT
-	);
-#else
-#	error
-#endif
-}
-
-
-/*=============================================================================
-▼	テクスチャリソースの生成
------------------------------------------------------------------------------*/
-static __forceinline void
-CreateTextureResource(
-){
-#if PREFER_GL_TEX_STORAGE_2D
-	glExtTexStorage2D(
-		/* GLenum target */			GL_TEXTURE_2D,
-		/* GLsizei levels */		8,
-		/* GLint internalformat */	(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
-									(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
-									(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
-									-1 /* error */,
-		/* GLsizei width */			SCREEN_WIDTH,
-		/* GLsizei height */		SCREEN_HEIGHT
-	);
-#else
-	glTexImage2D(
-		/* GLenum target */			GL_TEXTURE_2D,
-		/* GLint level */			0,
-		/* GLint internalformat */	(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA:
-									(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
-									(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
-									-1 /* error */,
-		/* GLsizei width */			SCREEN_WIDTH,
-		/* GLsizei height */		SCREEN_HEIGHT,
-		/* GLint border */			0,
-		/* GLenum format */			GL_RGBA,
-		/* GLenum type */			(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_UNSIGNED_BYTE:
-									(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_HALF_FLOAT:
-									(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_FLOAT:
-									-1 /* error */,
-		/* const void * data */		NULL
-	);
-#endif
-}
 
 
 /*=============================================================================
@@ -436,59 +967,36 @@ entrypoint(
 		}
 	}
 
-	/* グラフィクス用コンピュートテクスチャの作成 */
-	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex) {
-		glGenTextures(
-			/* GLsizei n */		NUM_RENDER_TARGETS,
-			/* GLuint * textures */		s_graphicsComputeTextures[doubleBufferIndex]
-		);
-		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
-			glBindTexture(
-				/* GLenum target */		GL_TEXTURE_2D,
-				/* GLuint texture */		s_graphicsComputeTextures[doubleBufferIndex][renderTargetIndex]
-			);
-#if PREFER_GL_TEX_STORAGE_2D
-			glExtTexStorage2D(
-				/* GLenum target */		GL_TEXTURE_2D,
-				/* GLsizei levels */		8,
-				/* GLint internalformat */	(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
-					(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
-					(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
-					GL_RGBA8,
-				/* GLsizei width */		SCREEN_WIDTH,
-				/* GLsizei height */	SCREEN_HEIGHT
-			);
-#else
-			glTexImage2D(
-				/* GLenum target */		GL_TEXTURE_2D,
-				/* GLint level */		0,
-				/* GLint internalformat */	(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
-					(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
-					(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
-					GL_RGBA8,
-				/* GLsizei width */		SCREEN_WIDTH,
-				/* GLsizei height */	SCREEN_HEIGHT,
-				/* GLint border */		0,
-				/* GLenum format */		GL_RGBA,
-				/* GLenum type */		(PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_UNSIGNED_BYTE:
-					(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_HALF_FLOAT:
-					(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_FLOAT:
-					GL_UNSIGNED_BYTE,
-				/* const void * data */	NULL
-			);
-#endif
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (TEXTURE_FILTER == TEXTURE_FILTER_NEAREST)? GL_NEAREST: GL_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (TEXTURE_FILTER == TEXTURE_FILTER_NEAREST)? GL_NEAREST: GL_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (TEXTURE_WRAP == TEXTURE_WRAP_REPEAT)? GL_REPEAT: (TEXTURE_WRAP == TEXTURE_WRAP_MIRRORED_REPEAT)? GL_MIRRORED_REPEAT: GL_CLAMP_TO_EDGE);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (TEXTURE_WRAP == TEXTURE_WRAP_REPEAT)? GL_REPEAT: (TEXTURE_WRAP == TEXTURE_WRAP_MIRRORED_REPEAT)? GL_MIRRORED_REPEAT: GL_CLAMP_TO_EDGE);
+	
+	/* グラフィクス用コンピュートシェーダの作成 */
+	s_graphicsComputeProgramId = glExtCreateShaderProgramv(
+		/* GLenum type */		GL_COMPUTE_SHADER,
+		/* GLsizei count */		1,
+		/* const GLchar* const *strings */	graphicsComputeShaderCodes
+	);
+	glExtGetProgramiv(
+		/* GLuint program */		s_graphicsComputeProgramId,
+		/* GLenum pname */		GL_COMPUTE_WORK_GROUP_SIZE,
+		/* GLint *params */		s_graphicsComputeWorkGroupSize
+	);
+	for (int i = 0; i < 3; ++i) {
+		if (s_graphicsComputeWorkGroupSize[i] <= 0) {
+			s_graphicsComputeWorkGroupSize[i] = 1;
 		}
 	}
-	glBindTexture(GL_TEXTURE_2D, 0);
+	if (s_graphicsComputeProgramId != 0) {
+		s_computePipelinePassUniformLocation = glGetUniformLocation(
+			s_graphicsComputeProgramId,
+			"g_pipelinePassIndex"
+		);
+	} else {
+		s_computePipelinePassUniformLocation = -1;
+	}
 
 	/* フラグメントシェーダの作成 */
 	int graphicsFsProgramId = glExtCreateShaderProgramv(
-		/* GLenum type */					GL_FRAGMENT_SHADER,
-		/* GLsizei count */					1,
+		/* GLenum type */				GL_FRAGMENT_SHADER,
+		/* GLsizei count */			1,
 		/* const GLchar* const *strings */	graphicsFragmentShaderCodes
 	);
 
@@ -496,83 +1004,20 @@ entrypoint(
 	glExtUseProgram(
 		/* GLuint program */	graphicsFsProgramId
 	);
-
-	/* コンピュートテクスチャをサンプリング用にバインド */
-	if (s_graphicsComputeProgramId != 0) {
-		int computeTextureIndex = (frameCount & 1) ^ 1;
-		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
-			glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX +  renderTargetIndex);
-			glBindTexture(GL_TEXTURE_2D, s_graphicsComputeTextures[computeTextureIndex][renderTargetIndex]);
-		}
-		glActiveTexture(GL_TEXTURE0);
-	}
-
-#if ENABLE_BACK_BUFFER
-#	if (NUM_RENDER_TARGETS == 1) && (PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)
-	/* サンプラの設定 */
-	SetTextureSampler();
-#	else
-	/*
-		フレームバッファ作成
-		得られる frameBufferFBO の値は予想できるが、
-		この関数呼び出しはキャンセルできない。
-	*/
-	GLuint frameBufferFBO;
-	glExtGenFramebuffers(
-		/* GLsizei n */		1,
-	 	/* GLuint *ids */	&frameBufferFBO
-	);
-
-	/* フレームバッファのバインド */
-	glExtBindFramebuffer(
-		/* GLenum target */			GL_FRAMEBUFFER,
-		/* GLuint framebuffer */	ASSUMED_FRAME_BUFFER_FBO
-	);
-
-	/* 有効なレンダーターゲットの指定 */
-	{
-		GLuint bufs[NUM_RENDER_TARGETS] = {
-#		if (NUM_RENDER_TARGETS >= 1)
-			GL_COLOR_ATTACHMENT0,
-#		endif
-#		if (NUM_RENDER_TARGETS >= 2)
-			GL_COLOR_ATTACHMENT0 + 1,
-#		endif
-#		if (NUM_RENDER_TARGETS >= 3)
-			GL_COLOR_ATTACHMENT0 + 2,
-#		endif
-#		if (NUM_RENDER_TARGETS >= 4)
-			GL_COLOR_ATTACHMENT0 + 3,
-#		endif
-		};
-		glExtDrawBuffers(
-			/* GLsizei n */				NUM_RENDER_TARGETS,
-			/* const GLenum *bufs */	bufs
+	if (graphicsFsProgramId != 0) {
+		s_fragmentPipelinePassUniformLocation = glGetUniformLocation(
+			graphicsFsProgramId,
+			"g_pipelinePassIndex"
 		);
+	} else {
+		s_fragmentPipelinePassUniformLocation = -1;
 	}
-#	endif
-#endif
 
-#if ENABLE_SWAP_INTERVAL_CONTROL
-	/* フリップの挙動を指定 */
-#	if SWAP_INTERVAL == SWAP_INTERVAL_ALLOW_TEARING
-	wglSwapIntervalEXT(
-		/* int interval */	-1		/* ティアリング許可 */
-	);
-#	elif SWAP_INTERVAL == SWAP_INTERVAL_HSYNC
-	wglSwapIntervalEXT(
-		/* int interval */	0		/* HSYNC */
-	);
-#	elif SWAP_INTERVAL == SWAP_INTERVAL_VSYNC
-	wglSwapIntervalEXT(
-		/* int interval */	1		/* VSYNC */
-	);
-#	else
-#		error
-#	endif
-#endif
+	memcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));
+	PipelineResetRuntimeResources();
+	PipelineEnsureResources(&s_pipelineDescription);
 
-	/* サウンド再生 */
+/* サウンド再生 */
 	HWAVEOUT hWaveOut;
 	waveOutOpen(
 		/* LPHWAVEOUT      phwo */			&hWaveOut,
@@ -588,278 +1033,68 @@ entrypoint(
 		/* UINT      cbwh */	sizeof(s_waveHeader)
 	);
 
+	
 	/* メインループ */
-#if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
-	int frameCount = -3;
-#else
-#	if ENABLE_FRAME_COUNT_UNIFORM
 	int frameCount = 0;
-#	endif
-#endif
+	bool enableFrameCountUniform = (ENABLE_FRAME_COUNT_UNIFORM != 0);
 	do {
-		/* 再生位置の取得 */
 		waveOutGetPosition(
 			/* HWAVEOUT hwo */	hWaveOut,
 			/* LPMMTIME pmmt */	&s_mmTime,
 			/* UINT cbmmt */	sizeof(MMTIME)
 		);
 
-		/*
-			再生位置をシェーダに渡す。
-			シェーダ側に該当 uniform の宣言を持たない場合、
-			この操作は GPU 側のデスクリプタを破壊するので要注意。
-		*/
 		int32_t waveOutPos = s_mmTime.u.sample;
-		glExtUniform1i(
-			/* GLint location */	0,
-			/* GLfloat v0 */		waveOutPos
-		);
-
-	/* グラフィクスコンピュートシェーダのディスパッチ */
-	if (s_graphicsComputeProgramId != 0) {
-		glExtUseProgram(s_graphicsComputeProgramId);
-
-		int readIndex = (frameCount & 1) ^ 1;
-		int writeIndex = (frameCount & 1);
-		GLenum imageFormat = (PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)? GL_RGBA8:
-			(PIXEL_FORMAT == PIXEL_FORMAT_FP16_RGBA)? GL_RGBA16F:
-			(PIXEL_FORMAT == PIXEL_FORMAT_FP32_RGBA)? GL_RGBA32F:
-			GL_RGBA8;
-
-		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
-			glExtBindImageTexture(renderTargetIndex, s_graphicsComputeTextures[readIndex][renderTargetIndex], 0, GL_FALSE, 0, GL_READ_ONLY, imageFormat);
-			glExtBindImageTexture(NUM_RENDER_TARGETS + renderTargetIndex, s_graphicsComputeTextures[writeIndex][renderTargetIndex], 0, GL_FALSE, 0, GL_WRITE_ONLY, imageFormat);
-		}
-
 		float timeInSeconds = (float)waveOutPos / (float)NUM_SOUND_SAMPLES_PER_SEC;
-		glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
-		glUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
-		glUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
-		glUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
 
-		GLuint workGroupSizeX = (GLuint)s_graphicsComputeWorkGroupSize[0];
-		GLuint workGroupSizeY = (GLuint)s_graphicsComputeWorkGroupSize[1];
-		GLuint workGroupSizeZ = (GLuint)s_graphicsComputeWorkGroupSize[2];
-		if (workGroupSizeX == 0) workGroupSizeX = 1;
-		if (workGroupSizeY == 0) workGroupSizeY = 1;
-		if (workGroupSizeZ == 0) workGroupSizeZ = 1;
+		PipelineEnsureResources(&s_pipelineDescription);
 
-		GLuint numGroupsX = (GLuint)((SCREEN_WIDTH + workGroupSizeX - 1) / workGroupSizeX);
-		GLuint numGroupsY = (GLuint)((SCREEN_HEIGHT + workGroupSizeY - 1) / workGroupSizeY);
-		GLuint numGroupsZ = 1;
-
-		glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
-		glExtMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
-
-		for (int imageUnit = 0; imageUnit < NUM_RENDER_TARGETS * 2; ++imageUnit) {
-			glExtBindImageTexture(imageUnit, 0, 0, GL_FALSE, 0, GL_READ_ONLY, imageFormat);
-		}
-
-		glExtUseProgram(graphicsFsProgramId);
-	}
-
-
-#if ENABLE_FRAME_COUNT_UNIFORM
-		/*
-			フレームカウンタをシェーダに渡す。
-			シェーダ側に該当 uniform の宣言を持たない場合、
-			この操作は GPU 側のデスクリプタを破壊するので要注意。
-		*/
-		glExtUniform1i(
-			/* GLint location */	1,
-			/* GLfloat v0 */		frameCount
-		);
-#endif
-
-
-#if ENABLE_BACK_BUFFER
-#	if (NUM_RENDER_TARGETS == 1) && (PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)
-
-#		if ENABLE_FRAME_COUNT_UNIFORM
-		frameCount++;
-#		endif
-
-#		if ENABLE_MIPMAP_GENERATION
-		/* ミップマップ生成 */
-		glExtGenerateMipmap(
-			/* GLenum target */		GL_TEXTURE_2D
-		);
-#		endif
-
-#	else
-#		if (NUM_RENDER_TARGETS == 1) && (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA)
-		/* 裏テクスチャをバインド */
-		glBindTexture(
-			/* GLenum target */		GL_TEXTURE_2D,
-			/* GLuint texture */	ASSUMED_MRT1_TEXTURE((frameCount & 1) ^ 1)
-		);
-
-		/* 裏テクスチャのリソース生成 */
-		if (++frameCount < 0) {
-			CreateTextureResource();
-#			if AVOID_GL_RUNTIME_ERROR_AND_START_FROM_ZERO_FRAME
-			continue;		/* これを省略すると初回フレームでランタイムエラー */
-#			endif
-		}
-
-		/* 表テクスチャを MRT として登録 */
-		glExtFramebufferTexture(
-			/* GLenum target */		GL_FRAMEBUFFER,
-			/* GLenum attachment */	GL_COLOR_ATTACHMENT0,
-			/* GLuint texture */	ASSUMED_MRT1_TEXTURE(frameCount & 1),
-			/* GLint level */		0
-		);
-
-		/* サンプラの設定 */
-		SetTextureSampler();
-
-#			if ENABLE_MIPMAP_GENERATION
-		/* ミップマップ生成 */
-		glExtGenerateMipmap(
-			/* GLenum target */		GL_TEXTURE_2D
-		);
-#			endif
-
-#		elif (NUM_RENDER_TARGETS > 1)
-		++frameCount;
-		for (
-			int renderTargetIndex = NUM_RENDER_TARGETS - 1;
-			renderTargetIndex >= 0;
-			renderTargetIndex--
-		) {
-			/* 裏テクスチャをバインド */
-			glExtActiveTexture(
-				/* GLenum texture */		GL_TEXTURE0 + renderTargetIndex
-			);
-			glBindTexture(
-				/* GLenum target */			GL_TEXTURE_2D,
-				/* GLuint texture */		ASSUMED_MRT_TEXTURE((frameCount & 1) ^ 1, renderTargetIndex)
-			);
-
-			/* 裏テクスチャのリソース生成 */
-			if (frameCount < 0) {
-				CreateTextureResource();
-#			if AVOID_GL_RUNTIME_ERROR_AND_START_FROM_ZERO_FRAME
-				continue;		/* これを省略すると初回フレームでランタイムエラー */
-#			endif
+		for (int passIndex = 0; passIndex < s_pipelineDescription.numPasses; ++passIndex) {
+			const PipelinePass *pass = &s_pipelineDescription.passes[passIndex];
+			bool executed = false;
+			s_activePipelinePassIndex = passIndex;
+			switch (pass->type) {
+				case PipelinePassTypeCompute: {
+					executed = PipelineExecuteComputePass(&s_pipelineDescription, pass, frameCount, waveOutPos, timeInSeconds);
+				} break;
+				case PipelinePassTypeFragment: {
+					executed = PipelineExecuteFragmentPass(&s_pipelineDescription, pass, frameCount, waveOutPos, timeInSeconds, graphicsFsProgramId, enableFrameCountUniform);
+				} break;
+				case PipelinePassTypePresent: {
+					executed = PipelineExecutePresentPass(&s_pipelineDescription, pass, frameCount);
+				} break;
+				default: {
+					executed = false;
+				} break;
 			}
-
-			/* 表テクスチャを MRT として登録 */
-			glExtFramebufferTexture(
-				/* GLenum target */			GL_FRAMEBUFFER,
-				/* GLenum attachment */		GL_COLOR_ATTACHMENT0 + renderTargetIndex,
-				/* GLuint texture */		ASSUMED_MRT_TEXTURE(frameCount & 1, renderTargetIndex),
-				/* GLint level */			0
-			);
-
-			/* サンプラの設定 */
-			SetTextureSampler();
-
-#			if ENABLE_MIPMAP_GENERATION
-			/* ミップマップ生成 */
-			glExtGenerateMipmap(
-				/* GLenum target */		GL_TEXTURE_2D
-			);
-#			endif
+			(void)executed;
+			s_activePipelinePassIndex = -1;
 		}
-#			if AVOID_GL_RUNTIME_ERROR_AND_START_FROM_ZERO_FRAME
-		if (frameCount < 0) continue;		/* これを省略すると初回フレームでランタイムエラー */
-#			endif
-#		else
-#			error
-#		endif
-#	endif
-#endif
+		s_activePipelinePassIndex = -1;
 
-		/* 画面全体を塗りつぶす矩形を描画 */
-		glRects(
-			/* GLshort x1 */	-1,
-			/* GLshort y1 */	-1,
-			/* GLshort x2 */	1,
-			/* GLshort y2 */	1
-		);
-
-#if ENABLE_BACK_BUFFER
-#	if (NUM_RENDER_TARGETS == 1) && (PIXEL_FORMAT == PIXEL_FORMAT_UNORM8_RGBA)
-		/*
-			バックバッファをテクスチャにコピーする。
-			OpenGL ではテクスチャ 0 番はデフォルトで存在し、
-			バインドもされているので、それを利用する。
-		*/
-		glCopyTexImage2D(
-			/* GLenum target */			GL_TEXTURE_2D,
-			/* GLint level */			0,
-			/* GLenum internalformat */	GL_RGBA8,
-			/* GLint x */				0,
-			/* GLint y */				0,
-			/* GLsizei width */			SCREEN_WIDTH,
-			/* GLsizei height */		SCREEN_HEIGHT,
-			/* GLint border */			0
-		);
-#	else
-		/* 描画結果をデフォルトフレームバッファにコピー */
-		glExtBlitNamedFramebuffer(
-			/* GLuint readFramebuffer */	ASSUMED_FRAME_BUFFER_FBO,
-			/* GLuint drawFramebuffer */	0,	/* 0 = デフォルトフレームバッファ */
-			/* GLint srcX0 */				0,
-			/* GLint srcY0 */				0,
-			/* GLint srcX1 */				SCREEN_WIDTH,
-			/* GLint srcY1 */				SCREEN_HEIGHT,
-			/* GLint dstX0 */				0,
-			/* GLint dstY0 */				0,
-			/* GLint dstX1 */				SCREEN_WIDTH,
-			/* GLint dstY1 */				SCREEN_HEIGHT,
-			/* GLbitfield mask */			GL_COLOR_BUFFER_BIT,
-			/* GLenum filter */				GL_NEAREST
-		);
-#	endif
-#endif
-
-			if (s_graphicsComputeProgramId != 0) {
-		for (int renderTargetIndex = 0; renderTargetIndex < NUM_RENDER_TARGETS; ++renderTargetIndex) {
-			glActiveTexture(GL_TEXTURE0 + COMPUTE_TEXTURE_START_INDEX +  renderTargetIndex);
-			glBindTexture(GL_TEXTURE_2D, 0);
-		}
-		glActiveTexture(GL_TEXTURE0);
-	}
-
-/* 画面フリップ */
 		SwapBuffers(
 			/* HDC  Arg1 */	hDC
 		);
 
-		/*
-			届いたメッセージを除去して捨てる。
-			一見不要な処理に思われるが、これを行わないと環境によっては
-			正しく動作しない。
-		*/
 		PeekMessage(
-			/* LPMSG lpMsg */			NULL,
-			/* HWND  hWnd */			0,
+			/* LPMSG lpMsg */		NULL,
+			/* HWND  hWnd */		0,
 			/* UINT  wMsgFilterMin */	0,
 			/* UINT  wMsgFilterMax */	0,
 			/* UINT  wRemoveMsg */		PM_REMOVE
 		);
 
-		/* ESC キーの状態を取得 */
-		uint16_t escapeKeyState = GetAsyncKeyState(
-			/* int vKey */		VK_ESCAPE
-		);
-
-		/* ESC キーが押されているならループを抜ける */
+		uint16_t escapeKeyState = GetAsyncKeyState(VK_ESCAPE);
 		if (escapeKeyState != 0) break;
-	} while (
-		/* サウンド再生位置が終点に達するまで継続 */
-		s_mmTime.u.sample < NUM_SOUND_BUFFER_AVAILABLE_SAMPLES
-	);
+
+		++frameCount;
+	} while (s_mmTime.u.sample < NUM_SOUND_BUFFER_AVAILABLE_SAMPLES);
 
 	if (s_graphicsComputeProgramId != 0) {
 		glDeleteProgram(s_graphicsComputeProgramId);
 		s_graphicsComputeProgramId = 0;
 	}
-	for (int doubleBufferIndex = 0; doubleBufferIndex < 2; ++doubleBufferIndex) {
-		glDeleteTextures(NUM_RENDER_TARGETS, s_graphicsComputeTextures[doubleBufferIndex]);
-	}
+	PipelineResetRuntimeResources();
 
 	/* デモを終了する */
 	ExitProcess(

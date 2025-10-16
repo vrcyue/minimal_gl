@@ -1,0 +1,178 @@
+{
+	"app":	{
+		"graphicsShaderFileName":	".\\pipeline_graphics.glsl",
+		"computeShaderFileName":	".\\pipeline_compute.glsl",
+		"soundShaderFileName":	"",
+		"xReso":	1280,
+		"yReso":	720
+	},
+	"camera":	{
+		"vec3Pos":	[0, 0, 0],
+		"vec3Ang":	[0, 0, 0],
+		"fovYInRadians":	0.39269909262657166
+	},
+	"captureScreenShotSettings":	{
+		"fileName":	"",
+		"xReso":	1280,
+		"yReso":	720,
+		"replaceAlphaByOne":	true
+	},
+	"captureCubemapSettings":	{
+		"fileName":	"",
+		"reso":	512
+	},
+	"renderSettings":	{
+		"pixelFormat":	0,
+		"enableMultipleRenderTargets":	true,
+		"numEnabledRenderTargets":	4,
+		"enableBackBuffer":	true,
+		"enableMipmapGeneration":	true,
+		"textureFilter":	1,
+		"textureWrap":	1,
+		"enableSwapIntervalControl":	true,
+		"swapInterval":	2
+	},
+	"pipeline":	{
+		"resources":	[{
+				"id":	"scene_color",
+				"pixelFormat":	"fp16_rgba",
+				"resolution":	{
+					"mode":	"framebuffer"
+				},
+				"historyLength":	1,
+				"sampler":	{
+					"filter":	"linear",
+					"wrap":	"clamp_to_edge"
+				}
+			}, {
+				"id":	"feedback",
+				"pixelFormat":	"fp16_rgba",
+				"resolution":	{
+					"mode":	"framebuffer"
+				},
+				"historyLength":	2,
+				"sampler":	{
+					"filter":	"linear",
+					"wrap":	"clamp_to_edge"
+				}
+			}, {
+				"id":	"composite_output",
+				"pixelFormat":	"fp16_rgba",
+				"resolution":	{
+					"mode":	"framebuffer"
+				},
+				"historyLength":	1,
+				"sampler":	{
+					"filter":	"linear",
+					"wrap":	"clamp_to_edge"
+				}
+			}],
+		"passes":	[{
+				"name":	"scene",
+				"type":	"fragment",
+				"shader":	".\\pipeline_graphics.glsl",
+				"outputs":	[{
+						"resource":	"scene_color",
+						"usage":	"color_attachment"
+					}],
+				"clear":	{
+					"color":	[0, 0, 0, 1],
+					"depth":	1
+				}
+			}, {
+				"name":	"feedback_compute",
+				"type":	"compute",
+				"shader":	".\\pipeline_compute.glsl",
+				"inputs":	[{
+						"resource":	"scene_color",
+						"usage":	"sampled"
+					}, {
+						"resource":	"feedback",
+						"usage":	"history_read",
+						"historyOffset":	-1
+					}],
+				"outputs":	[{
+						"resource":	"feedback",
+						"usage":	"image_write"
+					}],
+				"workGroupSize":	[8, 8, 1]
+			}, {
+				"name":	"composite",
+				"type":	"fragment",
+				"shader":	".\\pipeline_graphics.glsl",
+				"inputs":	[{
+						"resource":	"feedback",
+						"usage":	"sampled"
+					}, {
+						"resource":	"scene_color",
+						"usage":	"sampled"
+					}],
+				"outputs":	[{
+						"resource":	"composite_output",
+						"usage":	"color_attachment"
+					}]
+			}, {
+				"name":	"present",
+				"type":	"present",
+				"inputs":	[{
+						"resource":	"composite_output",
+						"usage":	"sampled"
+					}]
+			}]
+	},
+	"preferenceSettings":	{
+		"enableAutoRestartByGraphicsShader":	true,
+		"enableAutoRestartBySoundShader":	true
+	},
+	"executableExportSettings":	{
+		"fileName":	"",
+		"xReso":	1280,
+		"yReso":	720,
+		"durationInSeconds":	120,
+		"numSoundBufferSamples":	16777216,
+		"numSoundBufferAvailableSamples":	16777216,
+		"numSoundBufferSamplesPerDispatch":	32768,
+		"enableFrameCountUniform":	true,
+		"enableSoundDispatchWait":	true,
+		"shaderMinifierOptions":	{
+			"enableFieldNames":	false,
+			"fieldNameIndex":	0,
+			"noRenaming":	false,
+			"enableNoRenamingList":	false,
+			"noRenamingList":	"main",
+			"noSequence":	false,
+			"smoothstep":	false
+		},
+		"crinklerOptions":	{
+			"compMode":	2,
+			"useTinyHeader":	false,
+			"useTinyImport":	false
+		}
+	},
+	"recordImageSequenceSettings":	{
+		"directoryName":	"",
+		"xReso":	1280,
+		"yReso":	720,
+		"startTimeInSeconds":	0,
+		"durationInSeconds":	120,
+		"framesPerSecond":	60,
+		"replaceAlphaByOne":	true
+	},
+	"captureSoundSettings":	{
+		"fileName":	"",
+		"durationInSeconds":	120
+	},
+	"imGuiStatus":	{
+		"displayCurrentStatus":	true,
+		"displayCameraSettings":	true
+	},
+	"userTextures":	[{
+			"fileName":	""
+		}, {
+			"fileName":	""
+		}, {
+			"fileName":	""
+		}, {
+			"fileName":	""
+		}]
+}

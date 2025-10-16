@@ -1,6 +1,7 @@
 ﻿/* Copyright (C) 2018 Yosshin(@yosshin4004) */
 
 #include <math.h>
+#include <string.h>
 #include "common.h"
 #include "app.h"
 #include "graphics.h"
@@ -10,6 +11,7 @@
 #include "sound.h"
 #include "tiny_vmath.h"
 #include "dds_parser.h"
+#include "pipeline_description.h"
 
 
 #define USER_TEXTURE_START_INDEX				(8)
@@ -31,11 +33,1179 @@ static GLint s_computeWorkGroupSize[3] = {1, 1, 1};
 static RenderSettings s_currentRenderSettings = {(PixelFormat)0};
 static int s_xReso = DEFAULT_SCREEN_XRESO;
 static int s_yReso = DEFAULT_SCREEN_YRESO;
+static PipelineDescription s_pipelineDescription = {{0}};
+static bool s_pipelineHasCustomDescription = false;
+static int s_activePipelinePassIndex = -1;
+
+typedef struct {
+	GLuint textureIds[PIPELINE_MAX_HISTORY_LENGTH];
+	int width;
+	int height;
+	PixelFormat pixelFormat;
+	int historyLength;
+	bool initialized;
+} PipelineRuntimeResourceState;
+
+static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESOURCES] = {{0}};
 
 static void GraphicsDispatchCompute(
 	const CurrentFrameParams *params,
 	const RenderSettings *settings
 );
+static void GraphicsBuildLegacyPipelineDescription(
+	PipelineDescription *pipeline
+);
+static const PipelineDescription *GraphicsResolvePipelineDescription();
+static void GraphicsExecutePipeline(
+	const PipelineDescription *pipeline,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+);
+static void GraphicsResetPipelineRuntimeResources();
+static void GraphicsEnsurePipelineResources(
+	const PipelineDescription *pipeline,
+	const CurrentFrameParams *params
+);
+static GLuint GraphicsAcquirePipelineResourceTexture(
+	int resourceIndex,
+	int frameCount,
+	int historyOffset
+);
+static const PipelineResource *GraphicsGetPipelineResource(
+	const PipelineDescription *pipeline,
+	int resourceIndex
+);
+static PipelineRuntimeResourceState *GraphicsGetPipelineRuntimeResource(
+	int resourceIndex
+);
+static bool GraphicsParseLegacyResourceIndex(
+	const PipelineResource *resource,
+	const char *prefix,
+	int *outIndex
+);
+static void GraphicsSetTextureSampler(
+	GLenum target,
+	TextureFilter filter,
+	TextureWrap wrap,
+	bool enableMipmap
+);
+static void GraphicsDrawFullScreenQuad(
+	GLuint outputFrameBuffer,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+);
+static void GraphicsCreateFrameBuffer(
+	int xReso,
+	int yReso,
+	const RenderSettings *settings
+);
+static void GraphicsDeleteFrameBuffer(void);
+static void GraphicsCreateComputeTextures(
+	int xReso,
+	int yReso,
+	const RenderSettings *settings
+);
+static void GraphicsDeleteComputeTextures(void);
+static bool GraphicsExecuteComputePassPipeline(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+);
+static bool GraphicsExecuteFragmentPassPipeline(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+){
+	if (pipeline == NULL || pass == NULL || params == NULL || settings == NULL) {
+		return false;
+	}
+	if (s_fragmentShaderId == 0 || s_shaderPipelineId == 0) {
+		return false;
+	}
+
+	GLuint framebuffer = 0;
+	GLenum drawBuffers[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numColorAttachments = 0;
+	int targetWidth = params->xReso;
+	int targetHeight = params->yReso;
+
+	/* Collect outputs */
+	for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
+		const PipelineResourceBinding *binding = &pass->outputs[outputIndex];
+		if (binding->access != PipelineResourceAccessColorAttachment) {
+			continue;
+		}
+		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
+		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
+		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			return false;
+		}
+		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+			binding->resourceIndex,
+			params->frameCount,
+			binding->historyOffset
+		);
+		if (textureId == 0) {
+			return false;
+		}
+		if (numColorAttachments == 0) {
+			targetWidth = runtimeState->width;
+			targetHeight = runtimeState->height;
+		}
+		if (framebuffer == 0) {
+			glGenFramebuffers(1, &framebuffer);
+			glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+		}
+		GLenum attachment = GL_COLOR_ATTACHMENT0 + numColorAttachments;
+		glFramebufferTexture2D(
+			GL_FRAMEBUFFER,
+			attachment,
+			GL_TEXTURE_2D,
+			textureId,
+			0
+		);
+		drawBuffers[numColorAttachments] = attachment;
+		++numColorAttachments;
+	}
+
+	if (numColorAttachments == 0) {
+		/* No color targets -> fall back */
+		if (framebuffer != 0) {
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glDeleteFramebuffers(1, &framebuffer);
+		}
+		return false;
+	}
+
+	glDrawBuffers(numColorAttachments, drawBuffers);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glDeleteFramebuffers(1, &framebuffer);
+		return false;
+	}
+
+	glViewport(0, 0, targetWidth, targetHeight);
+
+	if (pass->clear.enableColorClear) {
+		glClearColor(
+			pass->clear.clearColor[0],
+			pass->clear.clearColor[1],
+			pass->clear.clearColor[2],
+			pass->clear.clearColor[3]
+		);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+
+	/* Bind shader pipeline */
+	glBindProgramPipeline(s_shaderPipelineId);
+
+	/* Bind sampled inputs */
+	GLuint samplerBaseUnit = 0;
+	GLuint boundSamplerUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundSamplerUnits = 0;
+	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+		const PipelineResourceBinding *binding = &pass->inputs[inputIndex];
+		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
+		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
+		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glDeleteFramebuffers(1, &framebuffer);
+			glBindProgramPipeline(0);
+			return false;
+		}
+		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+			binding->resourceIndex,
+			params->frameCount,
+			binding->historyOffset
+		);
+		if (textureId == 0) {
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glDeleteFramebuffers(1, &framebuffer);
+			glBindProgramPipeline(0);
+			return false;
+		}
+
+		switch (binding->access) {
+			case PipelineResourceAccessSampled:
+			case PipelineResourceAccessHistoryRead: {
+				int legacyIndex = 0;
+				GLuint samplerUnit = samplerBaseUnit + numBoundSamplerUnits;
+				bool enableMipmap = settings->enableMipmapGeneration;
+				if (GraphicsParseLegacyResourceIndex(resource, "legacy_mrt", &legacyIndex)) {
+					samplerUnit = (GLuint)legacyIndex;
+					enableMipmap = settings->enableMipmapGeneration;
+				} else if (GraphicsParseLegacyResourceIndex(resource, "legacy_compute", &legacyIndex)) {
+					samplerUnit = COMPUTE_TEXTURE_START_INDEX + (GLuint)legacyIndex;
+					enableMipmap = false;
+				}
+				glActiveTexture(GL_TEXTURE0 + samplerUnit);
+				glBindTexture(GL_TEXTURE_2D, textureId);
+				GraphicsSetTextureSampler(
+					GL_TEXTURE_2D,
+					resource->textureFilter,
+					resource->textureWrap,
+					enableMipmap
+				);
+				if (enableMipmap) {
+					glGenerateMipmap(GL_TEXTURE_2D);
+				}
+				boundSamplerUnits[numBoundSamplerUnits++] = samplerUnit;
+			} break;
+			default: {
+				/* Unsupported binding type for fragment pass */
+			} break;
+		}
+	}
+
+	/* Bind user textures (legacy support) */
+	for (int userTextureIndex = 0; userTextureIndex < NUM_USER_TEXTURES; userTextureIndex++) {
+		if (s_userTextures[userTextureIndex].id) {
+			GLuint unit = USER_TEXTURE_START_INDEX + userTextureIndex;
+			glActiveTexture(GL_TEXTURE0 + unit);
+			glBindTexture(
+				s_userTextures[userTextureIndex].target,
+				s_userTextures[userTextureIndex].id
+			);
+			GraphicsSetTextureSampler(
+				s_userTextures[userTextureIndex].target,
+				settings->textureFilter,
+				settings->textureWrap,
+				true
+			);
+		}
+	}
+
+	/* Bind sound SSBO */
+	glBindBufferBase(
+		GL_SHADER_STORAGE_BUFFER,
+		BUFFER_INDEX_FOR_SOUND_VISUALIZER_INPUT,
+		SoundGetOutputSsbo()
+	);
+
+	/* Upload uniforms */
+	glUseProgram(s_fragmentShaderId);
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
+		glUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
+		glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, params->waveOutPos);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
+		glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, params->frameCount);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_TIME, GL_FLOAT)) {
+		glUniform1f(UNIFORM_LOCATION_TIME, params->time);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_RESO, GL_FLOAT_VEC2)) {
+		glUniform2f(
+			UNIFORM_LOCATION_RESO,
+			(GLfloat)targetWidth,
+			(GLfloat)targetHeight
+		);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_MOUSE_POS, GL_FLOAT_VEC2)) {
+		glUniform2f(
+			UNIFORM_LOCATION_MOUSE_POS,
+			(GLfloat)params->xMouse / (GLfloat)targetWidth,
+			1.0f - (GLfloat)params->yMouse / (GLfloat)targetHeight
+		);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_MOUSE_BUTTONS, GL_INT_VEC3)) {
+		glUniform3i(
+			UNIFORM_LOCATION_MOUSE_BUTTONS,
+			params->mouseLButtonPressed,
+			params->mouseMButtonPressed,
+			params->mouseRButtonPressed
+		);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)) {
+		glUniform1f(UNIFORM_LOCATION_TAN_FOVY, tanf(params->fovYInRadians));
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)) {
+		glUniformMatrix4fv(
+			UNIFORM_LOCATION_CAMERA_COORD,
+			1,
+			GL_FALSE,
+			&params->mat4x4CameraInWorld[0][0]
+		);
+	}
+	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_PREV_CAMERA_COORD, GL_FLOAT_MAT4)) {
+		glUniformMatrix4fv(
+			UNIFORM_LOCATION_PREV_CAMERA_COORD,
+			1,
+			GL_FALSE,
+			&params->mat4x4PrevCameraInWorld[0][0]
+		);
+	}
+
+	/* Draw fullscreen quad */
+	GLfloat vertices[] = {
+		-1.0f, -1.0f,
+		 1.0f, -1.0f,
+		-1.0f,  1.0f,
+		 1.0f,  1.0f
+	};
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertices);
+	glEnableVertexAttribArray(0);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+	glMemoryBarrier(
+			GL_TEXTURE_FETCH_BARRIER_BIT
+		|	GL_FRAMEBUFFER_BARRIER_BIT
+	);
+
+	/* Cleanup */
+	glDisableVertexAttribArray(0);
+	glBindBufferBase(
+		GL_SHADER_STORAGE_BUFFER,
+		BUFFER_INDEX_FOR_SOUND_VISUALIZER_INPUT,
+		0
+	);
+
+	for (int userTextureIndex = 0; userTextureIndex < NUM_USER_TEXTURES; userTextureIndex++) {
+		if (s_userTextures[userTextureIndex].id) {
+			GLuint unit = USER_TEXTURE_START_INDEX + userTextureIndex;
+			glActiveTexture(GL_TEXTURE0 + unit);
+			glBindTexture(s_userTextures[userTextureIndex].target, 0);
+		}
+	}
+
+	for (int samplerIndex = 0; samplerIndex < numBoundSamplerUnits; ++samplerIndex) {
+		GLuint unit = boundSamplerUnits[samplerIndex];
+		glActiveTexture(GL_TEXTURE0 + unit);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	glActiveTexture(GL_TEXTURE0);
+
+	glBindProgramPipeline(0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &framebuffer);
+	glViewport(0, 0, params->xReso, params->yReso);
+
+	return true;
+}
+
+static bool GraphicsExecutePresentPassPipeline(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+){
+	(void)settings;
+
+	if (pipeline == NULL || pass == NULL || params == NULL) {
+		return false;
+	}
+
+	if (pass->numInputs <= 0) {
+		return false;
+	}
+
+	const PipelineResourceBinding *binding = &pass->inputs[0];
+	const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
+	PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
+	if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+		return false;
+	}
+	GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+		binding->resourceIndex,
+		params->frameCount,
+		binding->historyOffset
+	);
+	if (textureId == 0) {
+		return false;
+	}
+
+	int width = runtimeState->width > 0 ? runtimeState->width : params->xReso;
+	int height = runtimeState->height > 0 ? runtimeState->height : params->yReso;
+	if (width <= 0) width = params->xReso;
+	if (height <= 0) height = params->yReso;
+
+	GLuint readFbo = 0;
+	glGenFramebuffers(1, &readFbo);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+	glFramebufferTexture2D(
+		GL_READ_FRAMEBUFFER,
+		GL_COLOR_ATTACHMENT0,
+		GL_TEXTURE_2D,
+		textureId,
+		0
+	);
+
+	if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glDeleteFramebuffers(1, &readFbo);
+		return false;
+	}
+
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glBlitFramebuffer(
+		0, 0, width, height,
+		0, 0, params->xReso, params->yReso,
+		GL_COLOR_BUFFER_BIT,
+		GL_NEAREST
+	);
+
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &readFbo);
+	glViewport(0, 0, params->xReso, params->yReso);
+
+	return true;
+}
+
+static void GraphicsBuildLegacyPipelineDescription(
+	PipelineDescription *pipeline
+){
+	if (pipeline == NULL) {
+		return;
+	}
+
+	PipelineDescriptionInit(pipeline);
+
+	PixelFormat pixelFormat = s_currentRenderSettings.pixelFormat;
+	if (pixelFormat != PixelFormatUnorm8Rgba
+	&&	pixelFormat != PixelFormatFp16Rgba
+	&&	pixelFormat != PixelFormatFp32Rgba
+	) {
+		pixelFormat = DEFAULT_PIXEL_FORMAT;
+	}
+
+	int numRenderTargets = s_currentRenderSettings.enableMultipleRenderTargets
+		? s_currentRenderSettings.numEnabledRenderTargets
+		: 1;
+	if (numRenderTargets <= 0) numRenderTargets = 1;
+	if (numRenderTargets > NUM_RENDER_TARGETS) {
+		numRenderTargets = NUM_RENDER_TARGETS;
+	}
+
+	int mrtResourceIndices[NUM_RENDER_TARGETS] = {-1, -1, -1, -1};
+	for (int rtIndex = 0; rtIndex < numRenderTargets; ++rtIndex) {
+		if (pipeline->numResources >= PIPELINE_MAX_RESOURCES) {
+			break;
+		}
+		PipelineResource *mrtResource = &pipeline->resources[pipeline->numResources];
+		memset(mrtResource, 0, sizeof(*mrtResource));
+		char idBuffer[PIPELINE_MAX_RESOURCE_ID_LENGTH];
+		_snprintf_s(idBuffer, sizeof(idBuffer), _TRUNCATE, "legacy_mrt%d", rtIndex);
+		strlcpy(mrtResource->id, idBuffer, sizeof(mrtResource->id));
+		mrtResource->pixelFormat = pixelFormat;
+		mrtResource->resolution.mode = PipelineResolutionModeFramebuffer;
+		mrtResource->historyLength = 2;
+		mrtResource->textureFilter = s_currentRenderSettings.textureFilter;
+		mrtResource->textureWrap = s_currentRenderSettings.textureWrap;
+		mrtResourceIndices[rtIndex] = pipeline->numResources;
+		pipeline->numResources++;
+	}
+
+	int computeResourceIndices[NUM_RENDER_TARGETS] = {-1, -1, -1, -1};
+	if (s_computeShaderId != 0) {
+		for (int rtIndex = 0; rtIndex < NUM_RENDER_TARGETS; ++rtIndex) {
+			if (pipeline->numResources >= PIPELINE_MAX_RESOURCES) {
+				break;
+			}
+			PipelineResource *computeResource = &pipeline->resources[pipeline->numResources];
+			memset(computeResource, 0, sizeof(*computeResource));
+			char idBuffer[PIPELINE_MAX_RESOURCE_ID_LENGTH];
+			_snprintf_s(idBuffer, sizeof(idBuffer), _TRUNCATE, "legacy_compute%d", rtIndex);
+			strlcpy(computeResource->id, idBuffer, sizeof(computeResource->id));
+			computeResource->pixelFormat = pixelFormat;
+			computeResource->resolution.mode = PipelineResolutionModeFramebuffer;
+			computeResource->historyLength = 2;
+			computeResource->textureFilter = TextureFilterNearest;
+			computeResource->textureWrap = TextureWrapClampToEdge;
+			computeResourceIndices[rtIndex] = pipeline->numResources;
+			pipeline->numResources++;
+		}
+	}
+
+	bool hasComputeResource = false;
+	for (int rtIndex = 0; rtIndex < NUM_RENDER_TARGETS; ++rtIndex) {
+		if (computeResourceIndices[rtIndex] >= 0) {
+			hasComputeResource = true;
+			break;
+		}
+	}
+
+	if (hasComputeResource && pipeline->numPasses < PIPELINE_MAX_PASSES) {
+		PipelinePass *computePass = &pipeline->passes[pipeline->numPasses++];
+		memset(computePass, 0, sizeof(*computePass));
+		strlcpy(computePass->name, "legacy_compute", sizeof(computePass->name));
+		computePass->type = PipelinePassTypeCompute;
+		for (int rtIndex = 0; rtIndex < NUM_RENDER_TARGETS; ++rtIndex) {
+			int resourceIndex = computeResourceIndices[rtIndex];
+			if (resourceIndex < 0) {
+				continue;
+			}
+			if (computePass->numInputs < PIPELINE_MAX_BINDINGS_PER_PASS) {
+				computePass->inputs[computePass->numInputs].resourceIndex = resourceIndex;
+				computePass->inputs[computePass->numInputs].access = PipelineResourceAccessImageRead;
+				computePass->inputs[computePass->numInputs].historyOffset = -1;
+				computePass->numInputs++;
+			}
+			if (computePass->numOutputs < PIPELINE_MAX_BINDINGS_PER_PASS) {
+				computePass->outputs[computePass->numOutputs].resourceIndex = resourceIndex;
+				computePass->outputs[computePass->numOutputs].access = PipelineResourceAccessImageWrite;
+				computePass->outputs[computePass->numOutputs].historyOffset = 0;
+				computePass->numOutputs++;
+			}
+		}
+	}
+
+	if (pipeline->numPasses < PIPELINE_MAX_PASSES) {
+		PipelinePass *fragmentPass = &pipeline->passes[pipeline->numPasses++];
+		memset(fragmentPass, 0, sizeof(*fragmentPass));
+		strlcpy(fragmentPass->name, "legacy_fragment", sizeof(fragmentPass->name));
+		fragmentPass->type = PipelinePassTypeFragment;
+		for (int rtIndex = 0; rtIndex < numRenderTargets; ++rtIndex) {
+			int resourceIndex = mrtResourceIndices[rtIndex];
+			if (resourceIndex < 0 || fragmentPass->numOutputs >= PIPELINE_MAX_BINDINGS_PER_PASS) {
+				continue;
+			}
+			fragmentPass->outputs[fragmentPass->numOutputs].resourceIndex = resourceIndex;
+			fragmentPass->outputs[fragmentPass->numOutputs].access = PipelineResourceAccessColorAttachment;
+			fragmentPass->outputs[fragmentPass->numOutputs].historyOffset = 0;
+			fragmentPass->numOutputs++;
+		}
+		if (s_currentRenderSettings.enableBackBuffer) {
+			for (int rtIndex = 0; rtIndex < numRenderTargets; ++rtIndex) {
+				int resourceIndex = mrtResourceIndices[rtIndex];
+				if (resourceIndex < 0 || fragmentPass->numInputs >= PIPELINE_MAX_BINDINGS_PER_PASS) {
+					continue;
+				}
+				fragmentPass->inputs[fragmentPass->numInputs].resourceIndex = resourceIndex;
+				fragmentPass->inputs[fragmentPass->numInputs].access = PipelineResourceAccessSampled;
+				fragmentPass->inputs[fragmentPass->numInputs].historyOffset = -1;
+				fragmentPass->numInputs++;
+			}
+		}
+	for (int rtIndex = 0; rtIndex < NUM_RENDER_TARGETS; ++rtIndex) {
+		int resourceIndex = computeResourceIndices[rtIndex];
+		if (resourceIndex < 0 || fragmentPass->numInputs >= PIPELINE_MAX_BINDINGS_PER_PASS) {
+			continue;
+		}
+		fragmentPass->inputs[fragmentPass->numInputs].resourceIndex = resourceIndex;
+		fragmentPass->inputs[fragmentPass->numInputs].access = PipelineResourceAccessSampled;
+		fragmentPass->inputs[fragmentPass->numInputs].historyOffset = -1;
+		fragmentPass->numInputs++;
+	}
+	}
+
+	if (pipeline->numPasses < PIPELINE_MAX_PASSES) {
+		PipelinePass *presentPass = &pipeline->passes[pipeline->numPasses++];
+		memset(presentPass, 0, sizeof(*presentPass));
+		strlcpy(presentPass->name, "legacy_present", sizeof(presentPass->name));
+		presentPass->type = PipelinePassTypePresent;
+		if (mrtResourceIndices[0] >= 0) {
+			presentPass->inputs[presentPass->numInputs].resourceIndex = mrtResourceIndices[0];
+			presentPass->inputs[presentPass->numInputs].access = PipelineResourceAccessSampled;
+			presentPass->inputs[presentPass->numInputs].historyOffset = 0;
+			presentPass->numInputs++;
+		}
+	}
+}
+
+static const PipelineDescription *GraphicsResolvePipelineDescription(){
+	if (s_pipelineHasCustomDescription) {
+		if (s_pipelineDescription.numPasses == 0) {
+			s_pipelineHasCustomDescription = false;
+			GraphicsBuildLegacyPipelineDescription(&s_pipelineDescription);
+		}
+		return &s_pipelineDescription;
+	}
+
+	GraphicsBuildLegacyPipelineDescription(&s_pipelineDescription);
+	return &s_pipelineDescription;
+}
+
+static void GraphicsExecutePipeline(
+	const PipelineDescription *pipeline,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+){
+	if (pipeline == NULL) {
+		return;
+	}
+
+	GraphicsEnsurePipelineResources(pipeline, params);
+
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		const PipelinePass *pass = &pipeline->passes[passIndex];
+		s_activePipelinePassIndex = passIndex;
+		switch (pass->type) {
+			case PipelinePassTypeCompute: {
+				if (!GraphicsExecuteComputePassPipeline(pipeline, pass, params, settings)) {
+					GraphicsDispatchCompute(params, settings);
+				}
+			} break;
+			case PipelinePassTypeFragment: {
+				if (!GraphicsExecuteFragmentPassPipeline(pipeline, pass, params, settings)) {
+					GraphicsDrawFullScreenQuad(
+						0,
+						params,
+						settings
+					);
+				}
+			} break;
+			case PipelinePassTypePresent: {
+				if (!GraphicsExecutePresentPassPipeline(pipeline, pass, params, settings)) {
+					/* Present fallback: draw fullscreen quad to default framebuffer */
+					GraphicsDrawFullScreenQuad(
+						0,
+						params,
+						settings
+					);
+				}
+			} break;
+			default: {
+				/* 未対応のパスはスキップ */
+			} break;
+		}
+		s_activePipelinePassIndex = -1;
+	}
+	s_activePipelinePassIndex = -1;
+}
+
+static void GraphicsDeletePipelineRuntimeResource(
+	PipelineRuntimeResourceState *state
+){
+	if (state == NULL) return;
+	if (state->initialized == false) return;
+
+	for (int historyIndex = 0; historyIndex < state->historyLength; ++historyIndex) {
+		GLuint textureId = state->textureIds[historyIndex];
+		if (textureId != 0) {
+			glDeleteTextures(
+				/* GLsizei n */				1,
+				/* const GLuint *textures */	&state->textureIds[historyIndex]
+			);
+			state->textureIds[historyIndex] = 0;
+		}
+	}
+	state->initialized = false;
+	state->width = 0;
+	state->height = 0;
+	state->pixelFormat = (PixelFormat)0;
+	state->historyLength = 0;
+}
+
+static void GraphicsResetPipelineRuntimeResources(){
+	for (int resourceIndex = 0; resourceIndex < PIPELINE_MAX_RESOURCES; ++resourceIndex) {
+		GraphicsDeletePipelineRuntimeResource(&s_pipelineRuntimeResources[resourceIndex]);
+	}
+}
+
+static void GraphicsResolveResourceDimensions(
+	const PipelineResource *resource,
+	const CurrentFrameParams *params,
+	int *outWidth,
+	int *outHeight
+){
+	int width = params->xReso;
+	int height = params->yReso;
+
+	if (resource != NULL) {
+		switch (resource->resolution.mode) {
+			case PipelineResolutionModeFixed: {
+				if (resource->resolution.width > 0) {
+					width = resource->resolution.width;
+				}
+				if (resource->resolution.height > 0) {
+					height = resource->resolution.height;
+				}
+			} break;
+			case PipelineResolutionModeFramebuffer:
+			default: {
+				width = params->xReso;
+				height = params->yReso;
+			} break;
+		}
+	}
+
+	if (width <= 0) width = params->xReso;
+	if (height <= 0) height = params->yReso;
+	if (width <= 0) width = 1;
+	if (height <= 0) height = 1;
+
+	if (outWidth)  *outWidth = width;
+	if (outHeight) *outHeight = height;
+}
+
+static void GraphicsCreateOrResizePipelineResource(
+	PipelineRuntimeResourceState *state,
+	const PipelineResource *resource,
+	int width,
+	int height
+){
+	if (state == NULL || resource == NULL) {
+		return;
+	}
+
+	bool needsRecreate = false;
+
+	if (state->initialized == false) {
+		needsRecreate = true;
+	} else if (state->width != width
+	|| state->height != height
+	|| state->pixelFormat != resource->pixelFormat
+	|| state->historyLength != resource->historyLength
+	) {
+		needsRecreate = true;
+	}
+
+	if (needsRecreate) {
+		GraphicsDeletePipelineRuntimeResource(state);
+	}
+
+	if (state->initialized == false) {
+		int historyLength = resource->historyLength;
+		if (historyLength <= 0) {
+			historyLength = 1;
+		}
+		if (historyLength > PIPELINE_MAX_HISTORY_LENGTH) {
+			historyLength = PIPELINE_MAX_HISTORY_LENGTH;
+		}
+
+		GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
+		memset(state->textureIds, 0, sizeof(state->textureIds));
+		glGenTextures(
+			/* GLsizei n */				historyLength,
+			/* GLuint *textures */		state->textureIds
+		);
+
+		for (int historyIndex = 0; historyIndex < historyLength; ++historyIndex) {
+			GLuint textureId = state->textureIds[historyIndex];
+			glBindTexture(
+				/* GLenum target */		GL_TEXTURE_2D,
+				/* GLuint texture */	textureId
+			);
+			glTexImage2D(
+				/* GLenum target */			GL_TEXTURE_2D,
+				/* GLint level */			0,
+				/* GLint internalformat */	pixelFormatInfo.internalformat,
+				/* GLsizei width */			width,
+				/* GLsizei height */		height,
+				/* GLint border */			0,
+				/* GLenum format */			pixelFormatInfo.format,
+				/* GLenum type */			pixelFormatInfo.type,
+				/* const void * data */		NULL
+			);
+			GraphicsSetTextureSampler(
+				GL_TEXTURE_2D,
+				resource->textureFilter,
+				resource->textureWrap,
+				false
+			);
+		}
+		glBindTexture(
+			/* GLenum target */		GL_TEXTURE_2D,
+			/* GLuint texture */	0
+		);
+
+		state->initialized = true;
+		state->width = width;
+		state->height = height;
+		state->pixelFormat = resource->pixelFormat;
+		state->historyLength = historyLength;
+		for (int historyIndex = historyLength; historyIndex < PIPELINE_MAX_HISTORY_LENGTH; ++historyIndex) {
+			state->textureIds[historyIndex] = 0;
+		}
+	} else {
+		for (int historyIndex = 0; historyIndex < state->historyLength; ++historyIndex) {
+			GLuint textureId = state->textureIds[historyIndex];
+			glBindTexture(GL_TEXTURE_2D, textureId);
+			GraphicsSetTextureSampler(
+				GL_TEXTURE_2D,
+				resource->textureFilter,
+				resource->textureWrap,
+				false
+			);
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+}
+
+static void GraphicsEnsurePipelineResources(
+	const PipelineDescription *pipeline,
+	const CurrentFrameParams *params
+){
+	if (pipeline == NULL) return;
+	if (params == NULL) return;
+
+	for (int resourceIndex = 0; resourceIndex < pipeline->numResources; ++resourceIndex) {
+		const PipelineResource *resource = &pipeline->resources[resourceIndex];
+		PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
+		int width = 0;
+		int height = 0;
+		GraphicsResolveResourceDimensions(
+			resource,
+			params,
+			&width,
+			&height
+		);
+		GraphicsCreateOrResizePipelineResource(
+			state,
+			resource,
+			width,
+			height
+		);
+	}
+}
+
+static GLuint GraphicsAcquirePipelineResourceTexture(
+	int resourceIndex,
+	int frameCount,
+	int historyOffset
+){
+	if (resourceIndex < 0 || resourceIndex >= PIPELINE_MAX_RESOURCES) {
+		return 0;
+	}
+	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
+	if (state->initialized == false || state->historyLength <= 0) {
+		return 0;
+	}
+
+	int historyLength = state->historyLength;
+	int baseIndex = historyLength > 0 ? (frameCount % historyLength) : 0;
+	if (baseIndex < 0) {
+		baseIndex += historyLength;
+	}
+	int resolvedIndex = baseIndex + historyOffset;
+	while (resolvedIndex < 0) {
+		resolvedIndex += historyLength;
+	}
+	if (historyLength > 0) {
+		resolvedIndex %= historyLength;
+	}
+	if (resolvedIndex < 0 || resolvedIndex >= historyLength) {
+		resolvedIndex = baseIndex;
+	}
+
+	return state->textureIds[resolvedIndex];
+}
+
+static const PipelineResource *GraphicsGetPipelineResource(
+	const PipelineDescription *pipeline,
+	int resourceIndex
+){
+	if (pipeline == NULL) return NULL;
+	if (resourceIndex < 0 || resourceIndex >= pipeline->numResources) {
+		return NULL;
+	}
+	return &pipeline->resources[resourceIndex];
+}
+
+static PipelineRuntimeResourceState *GraphicsGetPipelineRuntimeResource(
+	int resourceIndex
+){
+	if (resourceIndex < 0 || resourceIndex >= PIPELINE_MAX_RESOURCES) {
+		return NULL;
+	}
+	return &s_pipelineRuntimeResources[resourceIndex];
+}
+
+static bool GraphicsParseLegacyResourceIndex(
+	const PipelineResource *resource,
+	const char *prefix,
+	int *outIndex
+){
+	if (resource == NULL || prefix == NULL) return false;
+	size_t prefixLength = strlen(prefix);
+	if (strncmp(resource->id, prefix, prefixLength) != 0) {
+		return false;
+	}
+	int index = 0;
+	const char *suffix = resource->id + prefixLength;
+	if (*suffix != '\0') {
+		index = atoi(suffix);
+	}
+	if (outIndex) {
+		*outIndex = index;
+	}
+	return true;
+}
+
+static void GraphicsSynchronizeRenderSettings(
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+){
+	bool resolutionChanged = (s_xReso != params->xReso) || (s_yReso != params->yReso);
+	bool renderSettingsChanged = (memcmp(&s_currentRenderSettings, settings, sizeof(RenderSettings)) != 0);
+
+	if (resolutionChanged || renderSettingsChanged) {
+		s_xReso = params->xReso;
+		s_yReso = params->yReso;
+		s_currentRenderSettings = *settings;
+
+		GraphicsResetPipelineRuntimeResources();
+
+		GraphicsDeleteFrameBuffer();
+		GraphicsDeleteComputeTextures();
+		GraphicsCreateFrameBuffer(params->xReso, params->yReso, settings);
+		GraphicsCreateComputeTextures(params->xReso, params->yReso, settings);
+	}
+}
+
+static bool GraphicsExecuteComputePassPipeline(
+	const PipelineDescription *pipeline,
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const RenderSettings *settings
+){
+	if (pipeline == NULL || pass == NULL || params == NULL || settings == NULL) {
+		return false;
+	}
+	if (s_computeShaderId == 0) {
+		return false;
+	}
+
+	GlPixelFormatInfo defaultPixelFormatInfo = PixelFormatToGlPixelFormatInfo(settings->pixelFormat);
+
+	GLuint samplerUnitBase = COMPUTE_TEXTURE_START_INDEX;
+	GLuint samplerUnitCount = 0;
+	GLint imageReadUnit = 0;
+	GLint imageWriteUnit = NUM_RENDER_TARGETS;
+	GLuint boundSamplerUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundSamplerUnits = 0;
+	GLuint boundImageUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundImageUnits = 0;
+	GLenum boundImageAccess[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+
+	/* Bind inputs */
+	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+		const PipelineResourceBinding *binding = &pass->inputs[inputIndex];
+		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
+		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
+		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			return false;
+		}
+		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+			binding->resourceIndex,
+			params->frameCount,
+			binding->historyOffset
+		);
+		if (textureId == 0) {
+			return false;
+		}
+
+		GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
+
+		switch (binding->access) {
+			case PipelineResourceAccessSampled:
+			case PipelineResourceAccessHistoryRead: {
+				GLuint samplerUnit = samplerUnitBase + samplerUnitCount;
+				glActiveTexture(GL_TEXTURE0 + samplerUnit);
+				glBindTexture(GL_TEXTURE_2D, textureId);
+				GraphicsSetTextureSampler(
+					GL_TEXTURE_2D,
+					resource->textureFilter,
+					resource->textureWrap,
+					false
+				);
+				boundSamplerUnits[numBoundSamplerUnits++] = samplerUnit;
+				++samplerUnitCount;
+			} break;
+			case PipelineResourceAccessImageRead: {
+				GLenum internalformat = pixelFormatInfo.internalformat != 0 ? pixelFormatInfo.internalformat : defaultPixelFormatInfo.internalformat;
+				glBindImageTexture(
+					imageReadUnit,
+					textureId,
+					0,
+					GL_FALSE,
+					0,
+					GL_READ_ONLY,
+					internalformat
+				);
+				boundImageUnits[numBoundImageUnits] = imageReadUnit;
+				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
+				++numBoundImageUnits;
+				++imageReadUnit;
+			} break;
+			default: {
+				/* Unsupported binding type for compute pass */
+				return false;
+			} break;
+		}
+	}
+
+	/* Bind outputs */
+	bool hasWritableOutput = false;
+	for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
+		const PipelineResourceBinding *binding = &pass->outputs[outputIndex];
+		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
+		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
+		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			return false;
+		}
+		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+			binding->resourceIndex,
+			params->frameCount,
+			binding->historyOffset
+		);
+		if (textureId == 0) {
+			return false;
+		}
+		GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
+		GLenum internalformat = pixelFormatInfo.internalformat != 0 ? pixelFormatInfo.internalformat : defaultPixelFormatInfo.internalformat;
+
+		switch (binding->access) {
+			case PipelineResourceAccessImageWrite: {
+				glBindImageTexture(
+					imageWriteUnit,
+					textureId,
+					0,
+					GL_FALSE,
+					0,
+					GL_WRITE_ONLY,
+					internalformat
+				);
+				boundImageUnits[numBoundImageUnits] = imageWriteUnit;
+				boundImageAccess[numBoundImageUnits] = GL_WRITE_ONLY;
+				++numBoundImageUnits;
+				++imageWriteUnit;
+				hasWritableOutput = true;
+			} break;
+			default: {
+				/* Unsupported output access for compute */
+				return false;
+			} break;
+		}
+	}
+
+	if (hasWritableOutput == false) {
+		/* Nothing useful to write; fall back */
+		return false;
+	}
+
+	glUseProgram(s_computeShaderId);
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
+		glUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
+		glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, params->waveOutPos);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
+		glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, params->frameCount);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_TIME, GL_FLOAT)) {
+		glUniform1f(UNIFORM_LOCATION_TIME, params->time);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_RESO, GL_FLOAT_VEC2)) {
+		glUniform2f(
+			UNIFORM_LOCATION_RESO,
+			(GLfloat)params->xReso,
+			(GLfloat)params->yReso
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_MOUSE_POS, GL_FLOAT_VEC2)) {
+		glUniform2f(
+			UNIFORM_LOCATION_MOUSE_POS,
+			(GLfloat)params->xMouse / (GLfloat)params->xReso,
+			1.0f - (GLfloat)params->yMouse / (GLfloat)params->yReso
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_MOUSE_BUTTONS, GL_INT_VEC3)) {
+		glUniform3i(
+			UNIFORM_LOCATION_MOUSE_BUTTONS,
+			params->mouseLButtonPressed,
+			params->mouseMButtonPressed,
+			params->mouseRButtonPressed
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)) {
+		glUniform1f(UNIFORM_LOCATION_TAN_FOVY, tanf(params->fovYInRadians));
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)) {
+		glUniformMatrix4fv(
+			UNIFORM_LOCATION_CAMERA_COORD,
+			1,
+			GL_FALSE,
+			&params->mat4x4CameraInWorld[0][0]
+		);
+	}
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_PREV_CAMERA_COORD, GL_FLOAT_MAT4)) {
+		glUniformMatrix4fv(
+			UNIFORM_LOCATION_PREV_CAMERA_COORD,
+			1,
+			GL_FALSE,
+			&params->mat4x4PrevCameraInWorld[0][0]
+		);
+	}
+
+	GLuint workGroupSizeX = (GLuint)(s_computeWorkGroupSize[0] > 0? s_computeWorkGroupSize[0]: 1);
+	GLuint workGroupSizeY = (GLuint)(s_computeWorkGroupSize[1] > 0? s_computeWorkGroupSize[1]: 1);
+	GLuint workGroupSizeZ = (GLuint)(s_computeWorkGroupSize[2] > 0? s_computeWorkGroupSize[2]: 1);
+	if (pass->overrideWorkGroupSize) {
+		if (pass->workGroupSize[0] > 0) workGroupSizeX = pass->workGroupSize[0];
+		if (pass->workGroupSize[1] > 0) workGroupSizeY = pass->workGroupSize[1];
+		if (pass->workGroupSize[2] > 0) workGroupSizeZ = pass->workGroupSize[2];
+	}
+
+	GLuint numGroupsX = (GLuint)((params->xReso + workGroupSizeX - 1) / workGroupSizeX);
+	GLuint numGroupsY = (GLuint)((params->yReso + workGroupSizeY - 1) / workGroupSizeY);
+	GLuint numGroupsZ = (GLuint)((1 + workGroupSizeZ - 1) / workGroupSizeZ);
+	if (numGroupsX == 0) numGroupsX = 1;
+	if (numGroupsY == 0) numGroupsY = 1;
+	if (numGroupsZ == 0) numGroupsZ = 1;
+
+	glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+
+	glMemoryBarrier(
+			GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
+		|	GL_TEXTURE_FETCH_BARRIER_BIT
+		|	GL_TEXTURE_UPDATE_BARRIER_BIT
+	);
+
+	/* Unbind image units */
+	for (int index = 0; index < numBoundImageUnits; ++index) {
+		GLuint unit = boundImageUnits[index];
+		GLenum access = boundImageAccess[index];
+		glBindImageTexture(
+			unit,
+			0,
+			0,
+			GL_FALSE,
+			0,
+			access,
+			defaultPixelFormatInfo.internalformat != 0 ? defaultPixelFormatInfo.internalformat : GL_RGBA8
+		);
+	}
+
+	/* Unbind textures */
+	for (int index = 0; index < numBoundSamplerUnits; ++index) {
+		GLuint samplerUnit = boundSamplerUnits[index];
+		glActiveTexture(GL_TEXTURE0 + samplerUnit);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	glActiveTexture(GL_TEXTURE0);
+
+	return true;
+}
+void GraphicsResetPipelineDescriptionToDefault(){
+	GraphicsResetPipelineRuntimeResources();
+	PipelineDescriptionInit(&s_pipelineDescription);
+	s_pipelineHasCustomDescription = false;
+}
+
+bool GraphicsApplyPipelineDescription(const PipelineDescription *pipeline){
+	if (pipeline == NULL) {
+		GraphicsResetPipelineDescriptionToDefault();
+		return true;
+	}
+	GraphicsResetPipelineRuntimeResources();
+	memcpy(&s_pipelineDescription, pipeline, sizeof(PipelineDescription));
+	s_pipelineHasCustomDescription = true;
+	return true;
+}
+
+bool GraphicsHasCustomPipelineDescription(){
+	return s_pipelineHasCustomDescription;
+}
+
+const PipelineDescription *GraphicsGetActivePipelineDescription(){
+	return GraphicsResolvePipelineDescription();
+}
 
 
 static void GraphicsCreateFrameBuffer(
@@ -195,6 +1365,7 @@ void GraphicsClearAllRenderTargets(){
 	GraphicsDeleteComputeTextures();
 	GraphicsCreateFrameBuffer(s_xReso, s_yReso, &s_currentRenderSettings);
 	GraphicsCreateComputeTextures(s_xReso, s_yReso, &s_currentRenderSettings);
+	GraphicsResetPipelineRuntimeResources();
 }
 
 bool GraphicsShaderRequiresFrameCountUniform(){
@@ -793,6 +1964,12 @@ static void GraphicsDrawFullScreenQuad(
 	{
 		glUseProgram(s_fragmentShaderId);
 
+		if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
+			glUniform1i(
+				/* GLint location */	UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
+				/* GLint v0 */			s_activePipelinePassIndex
+			);
+		}
 		if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
 			glUniform1i(
 				/* GLint location */	UNIFORM_LOCATION_WAVE_OUT_POS,
@@ -1493,6 +2670,12 @@ static void GraphicsDispatchCompute(
 	}
 
 	glUseProgram(s_computeShaderId);
+	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
+		glUniform1i(
+			/* GLint location */	UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
+			/* GLint v0 */			s_activePipelinePassIndex
+		);
+	}
 	if (ExistsShaderUniform(s_computeShaderId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
 		glUniform1i(
 			/* GLint location */	UNIFORM_LOCATION_WAVE_OUT_POS,
@@ -1596,11 +2779,10 @@ void GraphicsUpdate(
 	const CurrentFrameParams *params,
 	const RenderSettings *settings
 ){
-	GraphicsDispatchCompute(params, settings);
-
-	/* 画面全体に四角形を描画 */
-	GraphicsDrawFullScreenQuad(
-		0,		/* デフォルトフレームバッファに出力 */
+	GraphicsSynchronizeRenderSettings(params, settings);
+	const PipelineDescription *pipeline = GraphicsResolvePipelineDescription();
+	GraphicsExecutePipeline(
+		pipeline,
 		params,
 		settings
 	);
@@ -1631,6 +2813,7 @@ bool GraphicsInitialize(
 ){
 	GraphicsCreateFrameBuffer(s_xReso, s_yReso, &s_currentRenderSettings);
 	GraphicsCreateComputeTextures(s_xReso, s_yReso, &s_currentRenderSettings);
+	GraphicsResetPipelineDescriptionToDefault();
 
 	/* glRects() 相当の動作を模倣する簡単な頂点シェーダを作成 */
 	{
@@ -1655,6 +2838,6 @@ bool GraphicsTerminate(
 	GraphicsDeleteVertexShader();	/* false が得られてもエラー扱いとしない */
 	GraphicsDeleteComputeTextures();
 	GraphicsDeleteFrameBuffer();
+	GraphicsResetPipelineDescriptionToDefault();
 	return true;
 }
-

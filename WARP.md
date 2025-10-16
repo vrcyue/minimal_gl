@@ -99,6 +99,15 @@ MinimalGL uses a dual-pipeline approach:
 - `location=7`: cameraCoord (current camera transform)
 - `location=8`: prevCameraCoord (previous frame camera)
 
+### Pipeline Description Prototype
+
+- `src/pipeline_description.h` / `.cpp` define a JSON-serializable frame-graph prototype matching the design in `pipeline_design_jp.txt`.
+- Resources model pixel format, resolution source, history length, and sampler defaults while reserving slots for GL texture handles.
+- Passes capture type (fragment/compute/present), shader path, IO bindings with access modes, optional clear directives, and compute work-group overrides.
+- `GraphicsUpdate` now interprets a `PipelineDescription`; when no custom pipeline is supplied it synthesizes the legacy {compute → fragment → present} sequence automatically.
+- Exported runtimes embed the same description via `pipeline_description.inl`, so `src/resource/main.cpp` replays the identical frame-graph instead of hard-coded ping-pong logic.
+- See `examples/pipeline_sample.json` for a reference that expresses a fragment → compute → fragment → present flow with ping-pong history access.
+
 ### External Dependencies
 
 **Required Tools** (must be in PATH or same directory as executable):

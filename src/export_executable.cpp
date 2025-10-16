@@ -5,6 +5,7 @@
 #include "app.h"
 #include "dialog_confirm_over_write.h"
 #include "export_executable.h"
+#include "pipeline_description.h"
 
 
 #define USE_MAIN_CPP	1
@@ -160,6 +161,197 @@ RemoveComma(
 
 	free(fileImage);
 
+	return true;
+}
+
+static void
+WriteEscapedString(FILE *file, const char *string){
+	fputc('"', file);
+	if (string != NULL) {
+		for (const unsigned char *p = (const unsigned char *)string; *p != '\0'; ++p) {
+			unsigned char c = *p;
+			switch (c) {
+				case '\\':
+				case '\"': {
+					fputc('\\', file);
+					fputc(c, file);
+				} break;
+				case '\n': {
+					fputs("\\n", file);
+				} break;
+				case '\r': {
+					fputs("\\r", file);
+				} break;
+				case '\t': {
+					fputs("\\t", file);
+				} break;
+				default: {
+					fputc(c, file);
+				} break;
+			}
+		}
+	}
+	fputc('"', file);
+}
+
+static const char *
+PixelFormatEnumName(PixelFormat pixelFormat){
+	switch (pixelFormat) {
+		case PixelFormatUnorm8Rgba:	return "PixelFormatUnorm8Rgba";
+		case PixelFormatFp16Rgba:	return "PixelFormatFp16Rgba";
+		case PixelFormatFp32Rgba:	return "PixelFormatFp32Rgba";
+		default:					return "PixelFormatUnorm8Rgba";
+	}
+}
+
+static const char *
+TextureFilterEnumName(TextureFilter filter){
+	switch (filter) {
+		case TextureFilterNearest:	return "TextureFilterNearest";
+		case TextureFilterLinear:	return "TextureFilterLinear";
+		default:					return "TextureFilterLinear";
+	}
+}
+
+static const char *
+TextureWrapEnumName(TextureWrap wrap){
+	switch (wrap) {
+		case TextureWrapRepeat:			return "TextureWrapRepeat";
+		case TextureWrapClampToEdge:	return "TextureWrapClampToEdge";
+		case TextureWrapMirroredRepeat:	return "TextureWrapMirroredRepeat";
+		default:						return "TextureWrapClampToEdge";
+	}
+}
+
+static const char *
+PipelineResolutionModeEnumName(PipelineResolutionMode mode){
+	switch (mode) {
+		case PipelineResolutionModeFramebuffer:	return "PipelineResolutionModeFramebuffer";
+		case PipelineResolutionModeFixed:		return "PipelineResolutionModeFixed";
+		default:								return "PipelineResolutionModeFramebuffer";
+	}
+}
+
+static const char *
+PipelinePassTypeEnumName(PipelinePassType type){
+	switch (type) {
+		case PipelinePassTypeFragment:	return "PipelinePassTypeFragment";
+		case PipelinePassTypeCompute:	return "PipelinePassTypeCompute";
+		case PipelinePassTypePresent:	return "PipelinePassTypePresent";
+		default:						return "PipelinePassTypeFragment";
+	}
+}
+
+static const char *
+PipelineResourceAccessEnumName(PipelineResourceAccess access){
+	switch (access) {
+		case PipelineResourceAccessSampled:			return "PipelineResourceAccessSampled";
+		case PipelineResourceAccessImageRead:		return "PipelineResourceAccessImageRead";
+		case PipelineResourceAccessImageWrite:		return "PipelineResourceAccessImageWrite";
+		case PipelineResourceAccessHistoryRead:		return "PipelineResourceAccessHistoryRead";
+		case PipelineResourceAccessColorAttachment:	return "PipelineResourceAccessColorAttachment";
+		default:									return "PipelineResourceAccessSampled";
+	}
+}
+
+static bool
+WritePipelineDescriptionInl(
+	const PipelineDescription *pipeline,
+	const char *fileName
+){
+	FILE *file = fopen(fileName, "wt");
+	if (file == NULL) {
+		AppErrorMessageBox(APP_NAME, "Failed to open %s.", fileName);
+		return false;
+	}
+
+	fprintf(file, "/* Auto-generated pipeline description */\n");
+	fprintf(file, "static const PipelineDescription g_exportedPipelineDescription = {\n");
+
+	fprintf(file, "\t/* resources */\n\t{\n");
+	for (int resourceIndex = 0; resourceIndex < pipeline->numResources; ++resourceIndex) {
+		const PipelineResource *resource = &pipeline->resources[resourceIndex];
+		fprintf(file, "\t\t{\n");
+		fprintf(file, "\t\t\t/* id */ ");
+		WriteEscapedString(file, resource->id);
+		fprintf(file, ",\n");
+		fprintf(file, "\t\t\t/* pixelFormat */ %s,\n", PixelFormatEnumName(resource->pixelFormat));
+		fprintf(file, "\t\t\t/* resolution */ { %s, %d, %d },\n",
+			PipelineResolutionModeEnumName(resource->resolution.mode),
+			resource->resolution.width,
+			resource->resolution.height
+		);
+		fprintf(file, "\t\t\t/* historyLength */ %d,\n", resource->historyLength);
+		fprintf(file, "\t\t\t/* textureFilter */ %s,\n", TextureFilterEnumName(resource->textureFilter));
+		fprintf(file, "\t\t\t/* textureWrap */ %s,\n", TextureWrapEnumName(resource->textureWrap));
+		fprintf(file, "\t\t\t/* glTextureIds */ {0, 0, 0, 0}\n");
+		fprintf(file, "\t\t}%s\n", (resourceIndex + 1 < pipeline->numResources)? "," : "");
+	}
+	fprintf(file, "\t},\n");
+	fprintf(file, "\t/* numResources */ %d,\n", pipeline->numResources);
+
+	fprintf(file, "\t/* passes */\n\t{\n");
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		const PipelinePass *pass = &pipeline->passes[passIndex];
+		fprintf(file, "\t\t{\n");
+		fprintf(file, "\t\t\t/* name */ ");
+		WriteEscapedString(file, pass->name);
+		fprintf(file, ",\n");
+		fprintf(file, "\t\t\t/* type */ %s,\n", PipelinePassTypeEnumName(pass->type));
+		fprintf(file, "\t\t\t/* shaderPath */ ");
+		WriteEscapedString(file, pass->shaderPath);
+		fprintf(file, ",\n");
+		fprintf(file, "\t\t\t/* programId */ 0,\n");
+
+		fprintf(file, "\t\t\t/* inputs */ {\n");
+		for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+			const PipelineResourceBinding *binding = &pass->inputs[inputIndex];
+			fprintf(file, "\t\t\t\t{ %d, %s, %d }%s\n",
+				binding->resourceIndex,
+				PipelineResourceAccessEnumName(binding->access),
+				binding->historyOffset,
+				(inputIndex + 1 < pass->numInputs)? "," : ""
+			);
+		}
+		fprintf(file, "\t\t\t},\n");
+		fprintf(file, "\t\t\t/* numInputs */ %d,\n", pass->numInputs);
+
+		fprintf(file, "\t\t\t/* outputs */ {\n");
+		for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
+			const PipelineResourceBinding *binding = &pass->outputs[outputIndex];
+			fprintf(file, "\t\t\t\t{ %d, %s, %d }%s\n",
+				binding->resourceIndex,
+				PipelineResourceAccessEnumName(binding->access),
+				binding->historyOffset,
+				(outputIndex + 1 < pass->numOutputs)? "," : ""
+			);
+		}
+		fprintf(file, "\t\t\t},\n");
+		fprintf(file, "\t\t\t/* numOutputs */ %d,\n", pass->numOutputs);
+
+		fprintf(file, "\t\t\t/* clear */ { %s, { %.8f, %.8f, %.8f, %.8f }, %s, %.8f },\n",
+			pass->clear.enableColorClear? "true" : "false",
+			pass->clear.clearColor[0],
+			pass->clear.clearColor[1],
+			pass->clear.clearColor[2],
+			pass->clear.clearColor[3],
+			pass->clear.enableDepthClear? "true" : "false",
+			pass->clear.clearDepth
+		);
+
+		fprintf(file, "\t\t\t/* overrideWorkGroupSize */ %s,\n", pass->overrideWorkGroupSize? "true" : "false");
+		fprintf(file, "\t\t\t/* workGroupSize */ { %u, %u, %u }\n",
+			(unsigned int)pass->workGroupSize[0],
+			(unsigned int)pass->workGroupSize[1],
+			(unsigned int)pass->workGroupSize[2]
+		);
+		fprintf(file, "\t\t}%s\n", (passIndex + 1 < pipeline->numPasses)? "," : "");
+	}
+	fprintf(file, "\t},\n");
+	fprintf(file, "\t/* numPasses */ %d\n", pipeline->numPasses);
+	fprintf(file, "};\n");
+
+	fclose(file);
 	return true;
 }
 
@@ -374,6 +566,7 @@ bool ExportExecutableSub(
 	const char *graphicsComputeShaderInlFullPath,
 	const char *soundComputeShaderGlslFullPath,
 	const char *soundComputeShaderInlFullPath,
+	const char *pipelineDescriptionInlFullPath,
 	const char *crinklerReportFullPath,
 	const char *crinklerReuseFullPath,
 	const char *minifyBatFullPath,
@@ -381,6 +574,7 @@ bool ExportExecutableSub(
 	const char *outputGraphicsFragmentShaderInlFullPath,
 	const char *outputGraphicsComputeShaderInlFullPath,
 	const char *outputSoundComputeShaderInlFullPath,
+	const char *outputPipelineDescriptionInlFullPath,
 	const RenderSettings *renderSettings,
 	const ExecutableExportSettings *executableExportSettings
 ){
@@ -482,6 +676,17 @@ bool ExportExecutableSub(
 			soundShaderCode
 		);
 		fclose(file);
+	}
+
+	{
+		const PipelineDescription *pipeline = GraphicsGetActivePipelineDescription();
+		if (pipeline == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to obtain pipeline description.");
+			return false;
+		}
+		if (WritePipelineDescriptionInl(pipeline, pipelineDescriptionInlFullPath) == false) {
+			return false;
+		}
 	}
 
 	/* version ディレクティブの除去と保存 */
@@ -968,10 +1173,12 @@ bool ExportExecutableSub(
 				"copy graphics_fragment_shader.inl \"%s\" || exit /b 6\n"	/* arg 1 = graphics_fragment_shader.inl コピー先 */
 				"copy graphics_compute_shader.inl \"%s\" || exit /b 7\n"	/* arg 2 = graphics_compute_shader.inl コピー先 */
 				"copy sound_compute_shader.inl \"%s\" || exit /b 8\n"		/* arg 3 = sound_compute_shader.inl コピー先 */
+				"copy pipeline_description.inl \"%s\" || exit /b 9\n"		/* arg 4 = pipeline_description.inl コピー先 */
 				,
 				outputGraphicsFragmentShaderInlFullPath,					/* arg 1 */
 				outputGraphicsComputeShaderInlFullPath,					/* arg 2 */
-				outputSoundComputeShaderInlFullPath							/* arg 3 */
+				outputSoundComputeShaderInlFullPath,						/* arg 3 */
+				outputPipelineDescriptionInlFullPath						/* arg 4 */
 			);
 
 			fclose(file);
@@ -1013,12 +1220,15 @@ bool ExportExecutableSub(
 				case 6: {
 					AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputGraphicsFragmentShaderInlFullPath);
 				} break;
-				case 7: {
-					AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputGraphicsComputeShaderInlFullPath);
-				} break;
-				case 8: {
-					AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputSoundComputeShaderInlFullPath);
-				} break;
+		case 7: {
+			AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputGraphicsComputeShaderInlFullPath);
+		} break;
+		case 8: {
+			AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputSoundComputeShaderInlFullPath);
+		} break;
+		case 9: {
+			AppErrorMessageBox(APP_NAME, "Failed to copy to %s.", outputPipelineDescriptionInlFullPath);
+		} break;
 				default: {
 					assert(false);
 				} break;
@@ -1109,6 +1319,7 @@ bool ExportExecutable(
 	char soundComputeShaderGlslFullPath[MAX_PATH] = {0};
 	char soundComputeShaderTmpFullPath[MAX_PATH] = {0};
 	char soundComputeShaderInlFullPath[MAX_PATH] = {0};
+	char pipelineDescriptionInlFullPath[MAX_PATH] = {0};
 	char crinklerReportFullPath[MAX_PATH] = {0};
 	char crinklerReuseFullPath[MAX_PATH] = {0};
 	char minifyBatFullPath[MAX_PATH] = {0};
@@ -1116,6 +1327,7 @@ bool ExportExecutable(
 	char outputGraphicsFragmentShaderInlFullPath[MAX_PATH] = {0};
 	char outputGraphicsComputeShaderInlFullPath[MAX_PATH] = {0};
 	char outputSoundComputeShaderInlFullPath[MAX_PATH] = {0};
+	char outputPipelineDescriptionInlFullPath[MAX_PATH] = {0};
 #if USE_MAIN_CPP
 	snprintf(mainCppFullPath, sizeof(mainCppFullPath), "%s\\main.cpp", workDirName);
 	snprintf(glextHeaderFullPath, sizeof(glextHeaderFullPath), "%s\\GL\\glext.h", workDirName);
@@ -1136,6 +1348,7 @@ bool ExportExecutable(
 	snprintf(soundComputeShaderGlslFullPath, sizeof(soundComputeShaderGlslFullPath), "%s\\sound_compute_shader.glsl", workDirName);
 	snprintf(soundComputeShaderTmpFullPath,  sizeof(soundComputeShaderTmpFullPath),  "%s\\sound_compute_shader.i",  workDirName);
 	snprintf(soundComputeShaderInlFullPath,  sizeof(soundComputeShaderInlFullPath),  "%s\\sound_compute_shader.inl",  workDirName);
+	snprintf(pipelineDescriptionInlFullPath, sizeof(pipelineDescriptionInlFullPath), "%s\\pipeline_description.inl", workDirName);
 	snprintf(crinklerReportFullPath, sizeof(crinklerReportFullPath), "%s.crinkler_report.html", executableExportSettings->fileName);
 	snprintf(crinklerReuseFullPath, sizeof(crinklerReuseFullPath), "%s.crinkler_reuse.txt", executableExportSettings->fileName);
 	snprintf(minifyBatFullPath, sizeof(minifyBatFullPath), "%s\\minify.bat", workDirName);
@@ -1143,6 +1356,7 @@ bool ExportExecutable(
 	snprintf(outputGraphicsFragmentShaderInlFullPath, sizeof(outputGraphicsFragmentShaderInlFullPath), "%s.gfx.inl", executableExportSettings->fileName);
 	snprintf(outputGraphicsComputeShaderInlFullPath, sizeof(outputGraphicsComputeShaderInlFullPath), "%s.cmp.inl", executableExportSettings->fileName);
 	snprintf(outputSoundComputeShaderInlFullPath, sizeof(outputSoundComputeShaderInlFullPath), "%s.snd.inl", executableExportSettings->fileName);
+	snprintf(outputPipelineDescriptionInlFullPath, sizeof(outputPipelineDescriptionInlFullPath), "%s.pipeline.inl", executableExportSettings->fileName);
 
 	/* 上書き確認 */
 	if (DialogConfirmOverWrite(executableExportSettings->fileName) == DialogConfirmOverWriteResult_Canceled
@@ -1151,6 +1365,7 @@ bool ExportExecutable(
 	||	DialogConfirmOverWrite(outputGraphicsFragmentShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
 	||	DialogConfirmOverWrite(outputGraphicsComputeShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
 	||	DialogConfirmOverWrite(outputSoundComputeShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
+	||	DialogConfirmOverWrite(outputPipelineDescriptionInlFullPath) == DialogConfirmOverWriteResult_Canceled
 	) {
 		return false;
 	}
@@ -1178,6 +1393,7 @@ bool ExportExecutable(
 		graphicsComputeShaderInlFullPath,
 		soundComputeShaderGlslFullPath,
 		soundComputeShaderInlFullPath,
+		pipelineDescriptionInlFullPath,
 		crinklerReportFullPath,
 		crinklerReuseFullPath,
 		minifyBatFullPath,
@@ -1185,6 +1401,7 @@ bool ExportExecutable(
 		outputGraphicsFragmentShaderInlFullPath,
 		outputGraphicsComputeShaderInlFullPath,
 		outputSoundComputeShaderInlFullPath,
+		outputPipelineDescriptionInlFullPath,
 		renderSettings,
 		executableExportSettings
 	);

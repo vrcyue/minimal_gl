@@ -1,0 +1,111 @@
+{
+  "resources": [
+    {
+      "id": "scene_color",
+      "pixelFormat": "fp16_rgba",
+      "resolution": {
+        "mode": "framebuffer"
+      },
+      "historyLength": 1,
+      "sampler": {
+        "filter": "linear",
+        "wrap": "clamp_to_edge"
+      }
+    },
+    {
+      "id": "feedback",
+      "pixelFormat": "fp16_rgba",
+      "resolution": {
+        "mode": "framebuffer"
+      },
+      "historyLength": 2,
+      "sampler": {
+        "filter": "linear",
+        "wrap": "clamp_to_edge"
+      }
+    },
+    {
+      "id": "composite_output",
+      "pixelFormat": "fp16_rgba",
+      "resolution": {
+        "mode": "framebuffer"
+      },
+      "historyLength": 1,
+      "sampler": {
+        "filter": "linear",
+        "wrap": "clamp_to_edge"
+      }
+    }
+  ],
+  "passes": [
+    {
+      "name": "scene",
+      "type": "fragment",
+      "shader": "examples/shaders/pipeline_demo/pipeline_graphics.glsl",
+      "outputs": [
+        {
+          "resource": "scene_color",
+          "usage": "color_attachment"
+        }
+      ],
+      "clear": {
+        "color": [0.0, 0.0, 0.0, 1.0],
+        "depth": 1.0
+      }
+    },
+    {
+      "name": "feedback_compute",
+      "type": "compute",
+      "shader": "examples/shaders/pipeline_demo/pipeline_compute.glsl",
+      "inputs": [
+        {
+          "resource": "scene_color",
+          "usage": "sampled"
+        },
+        {
+          "resource": "feedback",
+          "usage": "history_read",
+          "historyOffset": -1
+        }
+      ],
+      "outputs": [
+        {
+          "resource": "feedback",
+          "usage": "image_write"
+        }
+      ],
+      "workGroupSize": [8, 8, 1]
+    },
+    {
+      "name": "composite",
+      "type": "fragment",
+      "shader": "examples/shaders/pipeline_demo/pipeline_graphics.glsl",
+      "inputs": [
+        {
+          "resource": "feedback",
+          "usage": "sampled"
+        },
+        {
+          "resource": "scene_color",
+          "usage": "sampled"
+        }
+      ],
+      "outputs": [
+        {
+          "resource": "composite_output",
+          "usage": "color_attachment"
+        }
+      ]
+    },
+    {
+      "name": "present",
+      "type": "present",
+      "inputs": [
+        {
+          "resource": "composite_output",
+          "usage": "sampled"
+        }
+      ]
+    }
+  ]
+}

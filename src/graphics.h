@@ -146,6 +146,13 @@ bool GraphicsCaptureAsDdsCubemap(
 	const CaptureCubemapSettings *captureSettings
 );
 
+/* パイプライン記述の管理 */
+struct PipelineDescription;
+void GraphicsResetPipelineDescriptionToDefault();
+bool GraphicsApplyPipelineDescription(const struct PipelineDescription *pipeline);
+bool GraphicsHasCustomPipelineDescription();
+const struct PipelineDescription *GraphicsGetActivePipelineDescription();
+
 /* グラフィクスの更新 */
 void GraphicsUpdate(
 	const CurrentFrameParams *params,
