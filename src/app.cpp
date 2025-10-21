@@ -9,6 +9,11 @@
 #include <stdarg.h>
 #include <math.h>
 #include <assert.h>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <cstring>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -90,6 +95,14 @@ static PipelineDescription s_pipelineDescriptionForProject = {{0}};
 static bool s_pipelineDescriptionIsValid = false;
 static char s_pipelineLastFileName[MAX_PATH] = {0};
 static void AppPipelineSetLastFileNameInternal(const char *fileName);
+static bool AppPrepareShaderSource(
+ const char *fileName,
+ const char *fallbackSource,
+ std::string &expandedSource,
+ const char **sourceToUse,
+ std::string &errorMessage,
+ std::vector<std::string> *includedFiles = NULL
+);
 static struct PreferenceSettings {
 	bool enableAutoRestartByGraphicsShader;
 	bool enableAutoRestartBySoundShader;
@@ -158,6 +171,84 @@ static char s_computeShaderFileName[MAX_PATH] = "";
 static char *s_computeShaderCode = NULL;
 static struct stat s_computeShaderFileStat;
 static bool s_computeCreateShaderSucceeded = false;
+
+struct ShaderIncludeDependency {
+	std::string fileName;
+	struct stat fileStat;
+};
+
+static std::vector<ShaderIncludeDependency> s_graphicsShaderIncludeDependencies;
+static std::vector<ShaderIncludeDependency> s_computeShaderIncludeDependencies;
+static std::vector<ShaderIncludeDependency> s_soundShaderIncludeDependencies;
+
+static std::string AppNormalizePath(const char *path){
+	if (path == NULL || path[0] == '\0') {
+		return std::string();
+	}
+	char buffer[MAX_PATH] = {0};
+	if (_fullpath(buffer, path, MAX_PATH) != NULL) {
+		std::string normalized(buffer);
+		std::transform(
+			normalized.begin(),
+			normalized.end(),
+			normalized.begin(),
+			[](unsigned char ch){ return static_cast<char>(std::tolower(ch)); }
+		);
+		return normalized;
+	}
+	std::string normalized(path);
+	std::transform(
+		normalized.begin(),
+		normalized.end(),
+		normalized.begin(),
+		[](unsigned char ch){ return static_cast<char>(std::tolower(ch)); }
+	);
+	return normalized;
+}
+
+static void AppSetShaderIncludeDependencies(
+	std::vector<ShaderIncludeDependency> &dependencies,
+	const std::vector<std::string> &includedFiles,
+	const char *rootFileName
+){
+	dependencies.clear();
+	std::string rootNormalized = AppNormalizePath(rootFileName);
+	for (const std::string &path : includedFiles) {
+		if (!rootNormalized.empty() && path == rootNormalized) {
+			continue;
+		}
+		ShaderIncludeDependency dependency;
+		dependency.fileName = path;
+		std::memset(&dependency.fileStat, 0, sizeof(dependency.fileStat));
+		stat(path.c_str(), &dependency.fileStat);
+		dependencies.push_back(std::move(dependency));
+	}
+}
+
+static void AppClearShaderIncludeDependencies(std::vector<ShaderIncludeDependency> &dependencies){
+	dependencies.clear();
+}
+
+static bool AppHaveShaderIncludeDependenciesUpdated(std::vector<ShaderIncludeDependency> &dependencies){
+	bool updated = false;
+	for (ShaderIncludeDependency &dependency : dependencies) {
+		struct stat currentStat;
+		if (stat(dependency.fileName.c_str(), &currentStat) != 0) {
+			if (dependency.fileStat.st_mtime != 0
+		||	dependency.fileStat.st_size != 0
+		) {
+				updated = true;
+			}
+			std::memset(&dependency.fileStat, 0, sizeof(dependency.fileStat));
+			continue;
+		}
+		if (dependency.fileStat.st_mtime != currentStat.st_mtime) {
+			updated = true;
+		}
+		dependency.fileStat = currentStat;
+	}
+	return updated;
+}
 
 static const char s_defaultGraphicsShaderCode[] =
 	"#version 430\n"
@@ -964,10 +1055,66 @@ void AppExportExecutable(){
 	&&	s_graphicsCreateShaderSucceeded
 	&&	s_computeCreateShaderSucceeded
 	) {
+		std::string expandedGraphicsShader;
+		std::string expandedComputeShader;
+		std::string expandedSoundShader;
+		std::string errorMessage;
+
+		const char *graphicsShaderSource = s_graphicsShaderCode;
+		if (AppPrepareShaderSource(
+				s_graphicsShaderFileName,
+				s_graphicsShaderCode,
+				expandedGraphicsShader,
+				&graphicsShaderSource,
+				errorMessage,
+				NULL
+			) == false
+		) {
+			if (errorMessage.empty()) {
+				errorMessage = "Failed to prepare graphics shader source.";
+			}
+			AppErrorMessageBox(APP_NAME, "%s", errorMessage.c_str());
+			return;
+		}
+
+		const char *computeShaderSource = s_computeShaderCode;
+		if (AppPrepareShaderSource(
+				s_computeShaderFileName,
+				s_computeShaderCode,
+				expandedComputeShader,
+				&computeShaderSource,
+				errorMessage,
+				NULL
+			) == false
+		) {
+			if (errorMessage.empty()) {
+				errorMessage = "Failed to prepare compute shader source.";
+			}
+			AppErrorMessageBox(APP_NAME, "%s", errorMessage.c_str());
+			return;
+		}
+
+		const char *soundShaderSource = s_soundShaderCode;
+		if (AppPrepareShaderSource(
+				s_soundShaderFileName,
+				s_soundShaderCode,
+				expandedSoundShader,
+				&soundShaderSource,
+				errorMessage,
+				NULL
+			) == false
+		) {
+			if (errorMessage.empty()) {
+				errorMessage = "Failed to prepare sound shader source.";
+			}
+			AppErrorMessageBox(APP_NAME, "%s", errorMessage.c_str());
+			return;
+		}
+
 		(void) ExportExecutable(
-			s_graphicsShaderCode,
-			s_computeShaderCode,
-			s_soundShaderCode,
+			graphicsShaderSource,
+			computeShaderSource,
+			soundShaderSource,
 			&s_renderSettings,
 			&s_executableExportSettings
 		);
@@ -1754,13 +1901,96 @@ bool AppGetForceOverWriteFlag(){
 /*=============================================================================
 ▼	シェーダファイル関連
 -----------------------------------------------------------------------------*/
+static bool AppPrepareShaderSource(
+	const char *fileName,
+	const char *fallbackSource,
+	std::string &expandedSource,
+	const char **sourceToUse,
+	std::string &errorMessage,
+	std::vector<std::string> *includedFiles
+){
+	errorMessage.clear();
+	if (sourceToUse == NULL) {
+		errorMessage = "Internal error: missing shader destination buffer.";
+		return false;
+	}
+
+	if (includedFiles != NULL) {
+		includedFiles->clear();
+	}
+
+	if (fileName != NULL && fileName[0] != '\0') {
+		if (includedFiles != NULL) {
+			if (ExpandShaderIncludes(fileName, expandedSource, *includedFiles, &errorMessage) == false) {
+				if (errorMessage.empty()) {
+					errorMessage = std::string(fileName) + ": error: failed to expand #include directives.";
+				}
+				return false;
+			}
+		} else if (ExpandShaderIncludes(fileName, expandedSource, &errorMessage) == false) {
+			if (errorMessage.empty()) {
+				errorMessage = std::string(fileName) + ": error: failed to expand #include directives.";
+			}
+			return false;
+		}
+		*sourceToUse = expandedSource.c_str();
+		return true;
+	}
+
+	if (fallbackSource == NULL) {
+		errorMessage = "No shader source available.";
+		return false;
+	}
+
+	*sourceToUse = fallbackSource;
+	expandedSource.clear();
+	return true;
+}
+
 static bool AppReloadGraphicsShader(){
 	GraphicsDeleteShaderPipeline();
 	GraphicsDeleteFragmentShader();
-	s_graphicsCreateShaderSucceeded = GraphicsCreateFragmentShader(s_graphicsShaderCode);
-	GraphicsCreateShaderPipeline();
-	if (s_preferenceSettings.enableAutoRestartByGraphicsShader) {
-		AppRestart();
+	if (s_graphicsShaderCode == NULL) {
+		s_graphicsCreateShaderSucceeded = false;
+		return false;
+	}
+	const char *sourceToCompile = s_graphicsShaderCode;
+	std::string expandedSource;
+	std::string errorMessage;
+	std::vector<std::string> includedFiles;
+	if (AppPrepareShaderSource(
+			s_graphicsShaderFileName,
+			s_graphicsShaderCode,
+			expandedSource,
+			&sourceToCompile,
+			errorMessage,
+			&includedFiles
+		) == false
+	) {
+		if (errorMessage.empty()) {
+			errorMessage = "Failed to prepare graphics shader source.";
+		}
+		AppErrorMessageBox(APP_NAME, "%s", errorMessage.c_str());
+		s_graphicsCreateShaderSucceeded = false;
+		return false;
+	}
+
+	if (s_graphicsShaderFileName[0] != '\0') {
+		AppSetShaderIncludeDependencies(
+			s_graphicsShaderIncludeDependencies,
+			includedFiles,
+			s_graphicsShaderFileName
+		);
+	} else {
+		AppClearShaderIncludeDependencies(s_graphicsShaderIncludeDependencies);
+	}
+
+	s_graphicsCreateShaderSucceeded = GraphicsCreateFragmentShader(sourceToCompile);
+	if (s_graphicsCreateShaderSucceeded) {
+		GraphicsCreateShaderPipeline();
+		if (s_preferenceSettings.enableAutoRestartByGraphicsShader) {
+			AppRestart();
+		}
 	}
 	return s_graphicsCreateShaderSucceeded;
 }
@@ -1771,8 +2001,39 @@ static bool AppReloadComputeShader(){
 		s_computeCreateShaderSucceeded = false;
 		return false;
 	}
-	s_computeCreateShaderSucceeded = GraphicsCreateComputeShader(s_computeShaderCode);
-	if (s_preferenceSettings.enableAutoRestartByGraphicsShader) {
+	const char *sourceToCompile = s_computeShaderCode;
+	std::string expandedSource;
+	std::string errorMessage;
+	std::vector<std::string> includedFiles;
+	if (AppPrepareShaderSource(
+			s_computeShaderFileName,
+			s_computeShaderCode,
+			expandedSource,
+			&sourceToCompile,
+			errorMessage,
+			&includedFiles
+		) == false
+	) {
+		if (errorMessage.empty()) {
+			errorMessage = "Failed to prepare compute shader source.";
+		}
+		AppErrorMessageBox(APP_NAME, "%s", errorMessage.c_str());
+		s_computeCreateShaderSucceeded = false;
+		return false;
+	}
+	if (s_computeShaderFileName[0] != '\0') {
+		AppSetShaderIncludeDependencies(
+			s_computeShaderIncludeDependencies,
+			includedFiles,
+			s_computeShaderFileName
+		);
+	} else {
+		AppClearShaderIncludeDependencies(s_computeShaderIncludeDependencies);
+	}
+	s_computeCreateShaderSucceeded = GraphicsCreateComputeShader(sourceToCompile);
+	if (s_computeCreateShaderSucceeded
+	&&	s_preferenceSettings.enableAutoRestartByGraphicsShader
+	) {
 		AppRestart();
 	}
 	return s_computeCreateShaderSucceeded;
@@ -1786,15 +2047,51 @@ static bool AppReloadSoundShader(){
 	*/
 
 	SoundDeleteShader();
-	s_soundCreateShaderSucceeded = SoundCreateShader(s_soundShaderCode);
-	if (s_preferenceSettings.enableAutoRestartBySoundShader) {
-		SoundPauseWaveOut();
-		SoundSeekWaveOut(0);
+	if (s_soundShaderCode == NULL) {
+		s_soundCreateShaderSucceeded = false;
+		return false;
 	}
-	SoundClearOutputBuffer();
-	SoundUpdate(s_frameCount);
-	if (s_preferenceSettings.enableAutoRestartBySoundShader) {
-		AppRestart();
+	const char *sourceToCompile = s_soundShaderCode;
+	std::string expandedSource;
+	std::string errorMessage;
+	std::vector<std::string> includedFiles;
+	if (AppPrepareShaderSource(
+			s_soundShaderFileName,
+			s_soundShaderCode,
+			expandedSource,
+			&sourceToCompile,
+			errorMessage,
+			&includedFiles
+		) == false
+	) {
+		if (errorMessage.empty()) {
+			errorMessage = "Failed to prepare sound shader source.";
+		}
+		AppErrorMessageBox(APP_NAME, "%s", errorMessage.c_str());
+		s_soundCreateShaderSucceeded = false;
+		return false;
+	}
+	if (s_soundShaderFileName[0] != '\0') {
+		AppSetShaderIncludeDependencies(
+			s_soundShaderIncludeDependencies,
+			includedFiles,
+			s_soundShaderFileName
+		);
+	} else {
+		AppClearShaderIncludeDependencies(s_soundShaderIncludeDependencies);
+	}
+
+	s_soundCreateShaderSucceeded = SoundCreateShader(sourceToCompile);
+	if (s_soundCreateShaderSucceeded) {
+		if (s_preferenceSettings.enableAutoRestartBySoundShader) {
+			SoundPauseWaveOut();
+			SoundSeekWaveOut(0);
+		}
+		SoundClearOutputBuffer();
+		SoundUpdate(s_frameCount);
+		if (s_preferenceSettings.enableAutoRestartBySoundShader) {
+			AppRestart();
+		}
 	}
 	return s_soundCreateShaderSucceeded;
 }
@@ -2062,6 +2359,7 @@ bool AppOpenDefaultGraphicsShader(){
 	memset(s_graphicsShaderFileName, 0, sizeof(s_graphicsShaderFileName));
 	if (s_graphicsShaderCode != NULL) free(s_graphicsShaderCode);
 	s_graphicsShaderCode = MallocCopyString(s_defaultGraphicsShaderCode);
+	AppClearShaderIncludeDependencies(s_graphicsShaderIncludeDependencies);
 	return AppReloadGraphicsShader();
 }
 
@@ -2069,6 +2367,7 @@ bool AppOpenDefaultComputeShader(){
 	memset(s_computeShaderFileName, 0, sizeof(s_computeShaderFileName));
 	if (s_computeShaderCode != NULL) free(s_computeShaderCode);
 	s_computeShaderCode = MallocCopyString(s_defaultComputeShaderCode);
+	AppClearShaderIncludeDependencies(s_computeShaderIncludeDependencies);
 	return AppReloadComputeShader();
 }
 
@@ -2076,6 +2375,7 @@ bool AppOpenDefaultSoundShader(){
 	memset(s_soundShaderFileName, 0, sizeof(s_soundShaderFileName));
 	if (s_soundShaderCode != NULL) free(s_soundShaderCode);
 	s_soundShaderCode = MallocCopyString(s_defaultSoundShaderCode);
+	AppClearShaderIncludeDependencies(s_soundShaderIncludeDependencies);
 	return AppReloadSoundShader();
 }
 
@@ -2089,6 +2389,7 @@ bool AppOpenGraphicsShaderFile(const char *fileName){
 	strcpy_s(s_graphicsShaderFileName, sizeof(s_graphicsShaderFileName), fileName);
 	AppUpdateWindowTitleBar();
 	s_graphicsShaderFileStat.st_mtime = 0;	/* 強制的に再読み込み */
+	AppClearShaderIncludeDependencies(s_graphicsShaderIncludeDependencies);
 
 	return true;
 }
@@ -2102,6 +2403,7 @@ bool AppOpenComputeShaderFile(const char *fileName){
 	strcpy_s(s_computeShaderFileName, sizeof(s_computeShaderFileName), fileName);
 	AppUpdateWindowTitleBar();
 	s_computeShaderFileStat.st_mtime = 0;	/* 強制的に再読み込み */
+	AppClearShaderIncludeDependencies(s_computeShaderIncludeDependencies);
 
 	return true;
 }
@@ -2115,6 +2417,7 @@ bool AppOpenSoundShaderFile(const char *fileName){
 	strcpy_s(s_soundShaderFileName, sizeof(s_soundShaderFileName), fileName);
 	AppUpdateWindowTitleBar();
 	s_soundShaderFileStat.st_mtime = 0;		/* 強制的に再読み込み */
+	AppClearShaderIncludeDependencies(s_soundShaderIncludeDependencies);
 
 	return true;
 }
@@ -2331,64 +2634,70 @@ bool AppUpdate(){
 		}
 	}
 
-	/* サウンドシェーダの更新 */
-	if (IsValidFileName(s_soundShaderFileName)) {
-		if (IsFileUpdated(s_soundShaderFileName, &s_soundShaderFileStat)) {
-			printf("update the sound shader.\n");
-			if (s_soundShaderCode != NULL) free(s_soundShaderCode);
-			/* ファイルのロック状態が継続していることがあるため、リトライしながら読む */
-			for (int retryCount = 0; retryCount < 10; retryCount++) {
-				s_soundShaderCode = MallocReadTextFile(s_soundShaderFileName);
-				if (s_soundShaderCode != NULL) break;
-				printf("retry %d ... \n", retryCount);
-				Sleep(100);
-			}
-			if (s_soundShaderCode == NULL) {
-				AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_soundShaderFileName);
-			} else {
-				AppReloadSoundShader();
-			}
+/* サウンドシェーダの更新 */
+if (IsValidFileName(s_soundShaderFileName)) {
+	bool includeUpdated = AppHaveShaderIncludeDependenciesUpdated(s_soundShaderIncludeDependencies);
+	bool fileUpdated = IsFileUpdated(s_soundShaderFileName, &s_soundShaderFileStat);
+	if (includeUpdated || fileUpdated) {
+		printf(includeUpdated && !fileUpdated ? "update the sound shader (include).\n" : "update the sound shader.\n");
+		if (s_soundShaderCode != NULL) free(s_soundShaderCode);
+		/* ファイルのロック状態が継続していることがあるため、リトライしながら読む */
+		for (int retryCount = 0; retryCount < 10; retryCount++) {
+			s_soundShaderCode = MallocReadTextFile(s_soundShaderFileName);
+			if (s_soundShaderCode != NULL) break;
+			printf("retry %d ... \n", retryCount);
+			Sleep(100);
+		}
+		if (s_soundShaderCode == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_soundShaderFileName);
+		} else {
+			AppReloadSoundShader();
 		}
 	}
+}
 
-	/* コンピュートシェーダの更新 */
-	if (IsValidFileName(s_computeShaderFileName)) {
-		if (IsFileUpdated(s_computeShaderFileName, &s_computeShaderFileStat)) {
-			printf("update the compute shader.\n");
-			if (s_computeShaderCode != NULL) free(s_computeShaderCode);
-			for (int retryCount = 0; retryCount < 10; retryCount++) {
-				s_computeShaderCode = MallocReadTextFile(s_computeShaderFileName);
-				if (s_computeShaderCode != NULL) break;
-				printf("retry %d ... \n", retryCount);
-				Sleep(100);
-			}
-			if (s_computeShaderCode == NULL) {
-				AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_computeShaderFileName);
-			} else {
-				AppReloadComputeShader();
-			}
+/* コンピュートシェーダの更新 */
+if (IsValidFileName(s_computeShaderFileName)) {
+	bool includeUpdated = AppHaveShaderIncludeDependenciesUpdated(s_computeShaderIncludeDependencies);
+	bool fileUpdated = IsFileUpdated(s_computeShaderFileName, &s_computeShaderFileStat);
+	if (includeUpdated || fileUpdated) {
+		printf(includeUpdated && !fileUpdated ? "update the compute shader (include).\n" : "update the compute shader.\n");
+		if (s_computeShaderCode != NULL) free(s_computeShaderCode);
+		for (int retryCount = 0; retryCount < 10; retryCount++) {
+			s_computeShaderCode = MallocReadTextFile(s_computeShaderFileName);
+			if (s_computeShaderCode != NULL) break;
+			printf("retry %d ... \n", retryCount);
+			Sleep(100);
+		}
+		if (s_computeShaderCode == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_computeShaderFileName);
+		} else {
+			AppReloadComputeShader();
 		}
 	}
+}
 
-	/* グラフィクスシェーダの更新 */
-	if (IsValidFileName(s_graphicsShaderFileName)) {
-		if (IsFileUpdated(s_graphicsShaderFileName, &s_graphicsShaderFileStat)) {
-			printf("update the graphics shader.\n");
-			if (s_graphicsShaderCode != NULL) free(s_graphicsShaderCode);
-			/* ファイルのロック状態が継続していることがあるため、リトライしながら読む */
-			for (int retryCount = 0; retryCount < 10; retryCount++) {
-				s_graphicsShaderCode = MallocReadTextFile(s_graphicsShaderFileName);
-				if (s_graphicsShaderCode != NULL) break;
-				printf("retry %d ... \n", retryCount);
-				Sleep(100);
-			}
-			if (s_graphicsShaderCode == NULL) {
-				AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_graphicsShaderFileName);
-			} else {
-				AppReloadGraphicsShader();
-			}
+/* グラフィクスシェーダの更新 */
+if (IsValidFileName(s_graphicsShaderFileName)) {
+	bool includeUpdated = AppHaveShaderIncludeDependenciesUpdated(s_graphicsShaderIncludeDependencies);
+	bool fileUpdated = IsFileUpdated(s_graphicsShaderFileName, &s_graphicsShaderFileStat);
+	if (includeUpdated || fileUpdated) {
+		printf(includeUpdated && !fileUpdated ? "update the graphics shader (include).\n" : "update the graphics shader.\n");
+		if (s_graphicsShaderCode != NULL) free(s_graphicsShaderCode);
+		/* ファイルのロック状態が継続していることがあるため、リトライしながら読む */
+		for (int retryCount = 0; retryCount < 10; retryCount++) {
+			s_graphicsShaderCode = MallocReadTextFile(s_graphicsShaderFileName);
+			if (s_graphicsShaderCode != NULL) break;
+			printf("retry %d ... \n", retryCount);
+			Sleep(100);
+		}
+		if (s_graphicsShaderCode == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to read %s.\n", s_graphicsShaderFileName);
+		} else {
+			AppReloadGraphicsShader();
 		}
 	}
+}
 
 	/* カメラコントロールが必要ならカメラ更新 */
 	if (GraphicsShaderRequiresCameraControlUniforms()) {

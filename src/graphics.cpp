@@ -964,8 +964,7 @@ static bool GraphicsExecuteComputePassPipeline(
 
 	GLuint samplerUnitBase = COMPUTE_TEXTURE_START_INDEX;
 	GLuint samplerUnitCount = 0;
-	GLint imageReadUnit = 0;
-	GLint imageWriteUnit = NUM_RENDER_TARGETS;
+	GLint nextImageUnit = 0;
 	GLuint boundSamplerUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
 	int numBoundSamplerUnits = 0;
 	GLuint boundImageUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
@@ -1008,8 +1007,9 @@ static bool GraphicsExecuteComputePassPipeline(
 			} break;
 			case PipelineResourceAccessImageRead: {
 				GLenum internalformat = pixelFormatInfo.internalformat != 0 ? pixelFormatInfo.internalformat : defaultPixelFormatInfo.internalformat;
+				GLint unit = nextImageUnit++;
 				glBindImageTexture(
-					imageReadUnit,
+					unit,
 					textureId,
 					0,
 					GL_FALSE,
@@ -1017,10 +1017,9 @@ static bool GraphicsExecuteComputePassPipeline(
 					GL_READ_ONLY,
 					internalformat
 				);
-				boundImageUnits[numBoundImageUnits] = imageReadUnit;
+				boundImageUnits[numBoundImageUnits] = unit;
 				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
 				++numBoundImageUnits;
-				++imageReadUnit;
 			} break;
 			default: {
 				/* Unsupported binding type for compute pass */
@@ -1051,8 +1050,9 @@ static bool GraphicsExecuteComputePassPipeline(
 
 		switch (binding->access) {
 			case PipelineResourceAccessImageWrite: {
+				GLint unit = nextImageUnit++;
 				glBindImageTexture(
-					imageWriteUnit,
+					unit,
 					textureId,
 					0,
 					GL_FALSE,
@@ -1060,10 +1060,9 @@ static bool GraphicsExecuteComputePassPipeline(
 					GL_WRITE_ONLY,
 					internalformat
 				);
-				boundImageUnits[numBoundImageUnits] = imageWriteUnit;
+				boundImageUnits[numBoundImageUnits] = unit;
 				boundImageAccess[numBoundImageUnits] = GL_WRITE_ONLY;
 				++numBoundImageUnits;
-				++imageWriteUnit;
 				hasWritableOutput = true;
 			} break;
 			default: {

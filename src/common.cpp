@@ -4,7 +4,226 @@
 #define WIN32_EXTRA_LEAN
 #include <windows.h>
 #include <Shlwapi.h>	/* for PathRelativePathTo */
+#include <algorithm>
+#include <cctype>
+#include <string>
+#include <vector>
+#include <unordered_set>
+#include <string.h>
 #include "common.h"
+
+static std::string NormalizePath(const std::string &path){
+	char buffer[MAX_PATH] = {0};
+	if (_fullpath(buffer, path.c_str(), MAX_PATH) != NULL) {
+		std::string normalized(buffer);
+		std::transform(
+			normalized.begin(),
+			normalized.end(),
+			normalized.begin(),
+			[](unsigned char ch){ return static_cast<char>(std::tolower(ch)); }
+		);
+		return normalized;
+	}
+	std::string normalized(path);
+	std::transform(
+		normalized.begin(),
+		normalized.end(),
+		normalized.begin(),
+		[](unsigned char ch){ return static_cast<char>(std::tolower(ch)); }
+	);
+	return normalized;
+}
+
+static std::string ExtractDirectory(const std::string &path){
+	char directoryPath[MAX_PATH] = {0};
+	SplitDirectoryPathFromFilePath(directoryPath, sizeof(directoryPath), path.c_str());
+	return std::string(directoryPath);
+}
+
+static std::string TrimLeftCopy(const std::string &text){
+	size_t index = 0;
+	while (index < text.size() && std::isspace(static_cast<unsigned char>(text[index]))) {
+		++index;
+	}
+	return text.substr(index);
+}
+
+static bool ExpandShaderIncludesInternal(
+	const std::string &filePath,
+	std::unordered_set<std::string> &stack,
+	std::unordered_set<std::string> &included,
+	std::string &output,
+	std::string *errorMessage
+){
+	output.clear();
+
+	std::string normalizedPath = NormalizePath(filePath);
+	if (included.find(normalizedPath) != included.end()) {
+		return true;
+	}
+	if (stack.find(normalizedPath) != stack.end()) {
+		if (errorMessage != NULL) {
+			*errorMessage = normalizedPath + ": error: detected circular #include directives.";
+		}
+		return false;
+	}
+
+	char *rawContent = MallocReadTextFile(normalizedPath.c_str());
+	if (rawContent == NULL) {
+		if (errorMessage != NULL) {
+			*errorMessage = normalizedPath + ": error: failed to read source file.";
+		}
+		return false;
+	}
+	std::string fileContent(rawContent);
+	free(rawContent);
+
+	stack.insert(normalizedPath);
+	const std::string baseDirectory = ExtractDirectory(normalizedPath);
+
+	size_t position = 0;
+	while (position < fileContent.size()) {
+		size_t lineEnd = fileContent.find('\n', position);
+		size_t segmentLength = (lineEnd == std::string::npos)
+			? (fileContent.size() - position)
+			: (lineEnd - position + 1);
+
+		std::string rawLine = fileContent.substr(position, segmentLength);
+		position += segmentLength;
+
+		std::string lineWithoutNewline = rawLine;
+		while (!lineWithoutNewline.empty() && (lineWithoutNewline.back() == '\n' || lineWithoutNewline.back() == '\r')) {
+			lineWithoutNewline.pop_back();
+		}
+		const bool lineHadTrailingNewline = (!rawLine.empty() && rawLine.back() == '\n');
+
+		std::string trimmed = TrimLeftCopy(lineWithoutNewline);
+		bool handled = false;
+		if (!trimmed.empty() && trimmed[0] == '#') {
+			size_t idx = 1;
+			while (idx < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[idx]))) {
+				++idx;
+			}
+			const std::string includeToken = "include";
+			if (trimmed.compare(idx, includeToken.size(), includeToken) == 0) {
+				idx += includeToken.size();
+				while (idx < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[idx]))) {
+					++idx;
+				}
+				if (idx < trimmed.size() && trimmed[idx] == '"') {
+					++idx;
+					size_t closing = trimmed.find('"', idx);
+					if (closing != std::string::npos) {
+						std::string includeRelativePath = trimmed.substr(idx, closing - idx);
+						char combinedPath[MAX_PATH] = {0};
+						GenerateCombinedPath(
+							combinedPath,
+							sizeof(combinedPath),
+							baseDirectory.c_str(),
+							includeRelativePath.c_str()
+						);
+
+						if (IsValidFileName(combinedPath) == false) {
+							if (errorMessage != NULL) {
+								*errorMessage =
+									normalizedPath
+									+ ": error: cannot open include file \""
+									+ includeRelativePath
+									+ "\" (resolved path: "
+									+ combinedPath
+									+ ").";
+							}
+							stack.erase(normalizedPath);
+							return false;
+						}
+
+						std::string includeFullPath = NormalizePath(combinedPath);
+
+						if (stack.find(includeFullPath) != stack.end()) {
+							if (errorMessage != NULL) {
+								*errorMessage =
+									normalizedPath
+									+ ": error: detected circular #include involving \""
+									+ includeRelativePath
+									+ "\".";
+							}
+							stack.erase(normalizedPath);
+							return false;
+						}
+
+						std::string includedSource;
+						if (ExpandShaderIncludesInternal(includeFullPath, stack, included, includedSource, errorMessage) == false) {
+							stack.erase(normalizedPath);
+							return false;
+						}
+						if (!includedSource.empty()) {
+							output.append(includedSource);
+						}
+						if (lineHadTrailingNewline && (output.empty() || output.back() != '\n')) {
+							output.push_back('\n');
+						}
+						handled = true;
+					}
+				}
+			}
+		}
+
+		if (handled == false) {
+			output.append(rawLine);
+		}
+	}
+
+	stack.erase(normalizedPath);
+	included.insert(normalizedPath);
+	return true;
+}
+
+bool ExpandShaderIncludes(
+	const std::string &filePath,
+	std::unordered_set<std::string> &stack,
+	std::unordered_set<std::string> &included,
+	std::string &output,
+	std::string *errorMessage
+){
+	return ExpandShaderIncludesInternal(filePath, stack, included, output, errorMessage);
+}
+
+bool ExpandShaderIncludes(
+	const std::string &filePath,
+	std::unordered_set<std::string> &stack,
+	std::string &output,
+	std::string *errorMessage
+){
+	std::unordered_set<std::string> included;
+	return ExpandShaderIncludesInternal(filePath, stack, included, output, errorMessage);
+}
+
+bool ExpandShaderIncludes(
+	const std::string &filePath,
+	std::string &output,
+	std::string *errorMessage
+){
+	std::unordered_set<std::string> stack;
+	std::unordered_set<std::string> included;
+	return ExpandShaderIncludesInternal(filePath, stack, included, output, errorMessage);
+}
+
+bool ExpandShaderIncludes(
+	const std::string &filePath,
+	std::string &output,
+	std::vector<std::string> &includedFiles,
+	std::string *errorMessage
+){
+	std::unordered_set<std::string> stack;
+	std::unordered_set<std::string> included;
+	bool result = ExpandShaderIncludesInternal(filePath, stack, included, output, errorMessage);
+	if (result) {
+		includedFiles.assign(included.begin(), included.end());
+	} else {
+		includedFiles.clear();
+	}
+	return result;
+}
 
 
 size_t

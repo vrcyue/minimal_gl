@@ -235,6 +235,37 @@ void SetMenuItemCheck(
 	bool flag
 );
 
+#ifdef __cplusplus
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+bool ExpandShaderIncludes(
+ const std::string &filePath,
+ std::unordered_set<std::string> &stack,
+ std::unordered_set<std::string> &included,
+ std::string &output,
+ std::string *errorMessage = NULL
+);
+bool ExpandShaderIncludes(
+ const std::string &filePath,
+ std::unordered_set<std::string> &stack,
+ std::string &output,
+ std::string *errorMessage = NULL
+);
+bool ExpandShaderIncludes(
+ const std::string &filePath,
+ std::string &output,
+ std::string *errorMessage = NULL
+);
+bool ExpandShaderIncludes(
+ const std::string &filePath,
+ std::string &output,
+ std::vector<std::string> &includedFiles,
+ std::string *errorMessage = NULL
+);
+#endif
+
 #define SIZE_OF_ARRAY(a) (sizeof(a) / sizeof(a[0]))
 
 
