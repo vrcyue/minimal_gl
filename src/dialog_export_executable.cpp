@@ -102,6 +102,12 @@ static LRESULT CALLBACK DialogFunc(
 				AppExportExecutableGetEnableSoundDispatchWaitFlag()
 			);
 
+			/* ウィンドウモード使用フラグをチェックボックスに設定 */
+			SetDlgItemCheck(
+				hDwnd, IDD_EXPORT_EXECUTABLE_USE_WINDOW_MODE,
+				AppExportExecutableGetUseWindowModeFlag()
+			);
+
 			/* ShaderMinifier の field-names 有効化フラグをチェックボックスに設定 */
 			SetDlgItemCheck(
 				hDwnd, IDD_EXPORT_EXECUTABLE_SHADER_MINIFIER_ENABLE_FIELD_NAMES,
@@ -300,6 +306,11 @@ static LRESULT CALLBACK DialogFunc(
 						hDwnd, IDD_EXPORT_EXECUTABLE_ENABLE_SOUND_DISPATCH_WAIT
 					);
 
+					/* ウィンドウモード使用フラグをチェックボックスから取得 */
+					bool useWindowMode = GetDlgItemCheck(
+						hDwnd, IDD_EXPORT_EXECUTABLE_USE_WINDOW_MODE
+					);
+
 					/* ShaderMinifier の field-names 有効化フラグをチェックボックスから取得 */
 					bool shaderMinifierEnableFieldNames = GetDlgItemCheck(
 						hDwnd, IDD_EXPORT_EXECUTABLE_SHADER_MINIFIER_ENABLE_FIELD_NAMES
@@ -384,6 +395,7 @@ static LRESULT CALLBACK DialogFunc(
 					AppExportExecutableSetDurationInSeconds(duration);
 					AppExportExecutableSetEnableFrameCountUniformFlag(enableFrameCountUniform);
 					AppExportExecutableSetEnableSoundDispatchWaitFlag(enableSoundDispatchWait);
+					AppExportExecutableSetUseWindowModeFlag(useWindowMode);
 					AppExportExecutableSetCurrentOutputFileName(outputFileName);
 					AppExportExecutableSetShaderMinifierOptionsEnableFieldNames(shaderMinifierEnableFieldNames);
 					AppExportExecutableSetShaderMinifierOptionsFieldNameIndex(shaderMinifierFieldNameIndex);

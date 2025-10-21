@@ -29,6 +29,7 @@ struct ExecutableExportSettings {
 	int numSoundBufferSamplesPerDispatch;
 	bool enableFrameCountUniform;
 	bool enableSoundDispatchWait;
+	bool useWindowMode;
 	struct ShaderMinifierOptions {
 		bool enableFieldNames;
 		int fieldNameIndex;

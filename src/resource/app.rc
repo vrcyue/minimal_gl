@@ -1,6 +1,6 @@
 /* Copyright (C) 2018 Yosshin(@yosshin4004) */
 /*
-	’ˆÓF‚±‚Ìƒtƒ@ƒCƒ‹‚Í SJIS CRLF ‚Å‹Lq‚³‚ê‚Ä‚¢‚é•K—v‚ª‚ ‚éB
+	ï¿½ï¿½ï¿½ÓFï¿½ï¿½ï¿½Ìƒtï¿½@ï¿½Cï¿½ï¿½ï¿½ï¿½ SJIS CRLF ï¿½Å‹Lï¿½qï¿½ï¿½ï¿½ï¿½Ä‚ï¿½ï¿½ï¿½Kï¿½vï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
 */
 
 #include <windows.h>
@@ -18,7 +18,7 @@ IDR_RESOURCE_CPP	MY_EMBEDDED_RESOURCE	"resource.cpp"
 
 
 /*------------------------------------------------------------------------------
-	’è”
+	ï¿½è”
 ------------------------------------------------------------------------------*/
 #define MARGIN_W				8
 #define MARGIN_H				8
@@ -613,7 +613,7 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 #define DIALOG_X		10
 #define DIALOG_Y		10
 #define DIALOG_W		DESCRIPTION_X + 0x28 + PATH_EDITTEXT_W + PATH_BROWSE_BUTTON_W + MARGIN_W
-#define DIALOG_H		EDITBOX_Y + 0x160 + MARGIN_H
+#define DIALOG_H		EDITBOX_Y + 0x170 + MARGIN_H
 
 
 EXPORT_EXECUTABLE DIALOG DIALOG_X, DIALOG_Y, DIALOG_W, DIALOG_H
@@ -623,7 +623,7 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 {
 	DEFPUSHBUTTON "OK",
 		IDOK,
-			DIALOG_W - MARGIN_W - SUBMIT_BUTTON_W, EDITBOX_Y + 0x150, SUBMIT_BUTTON_W, SUBMIT_BUTTON_H,
+			DIALOG_W - MARGIN_W - SUBMIT_BUTTON_W, EDITBOX_Y + 0x160, SUBMIT_BUTTON_W, SUBMIT_BUTTON_H,
 			WS_CHILD | WS_VISIBLE | WS_TABSTOP
 
 	LTEXT "Resolution (in pixels)", IDC_DUMMY, DESCRIPTION_X, DESCRIPTION_Y + 0x00, DESCRIPTION_W, FONT_H
@@ -713,16 +713,16 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 				DESCRIPTION_X + 0x10, DESCRIPTION_Y + 0x130, DIALOG_W, FONT_H
 
 /*
-	TINYIMPORT ‚ðŽg‚¤‚ÆAƒtƒ@ƒCƒ‹ƒTƒCƒY‚Å—L—˜‚É‚È‚é‚ª«—ˆ‚ÌˆÀ’è«‚ÍŽ¸‚í‚ê‚éB
-	«—ˆ‚ÌˆÀ’è«‚ª–³‚¢‚Æ‚¢‚¤‚±‚Æ‚ÍA‚»‚ê‚ðŽg‚Á‚½ƒfƒ‚‚Í windows update Œã‚É‚Í
-	‚Ù‚Ú“®ì‚µ‚È‚­‚È‚é‚±‚Æ‚ðˆÓ–¡‚·‚éB
-	‚±‚Ì‚æ‚¤‚ÉAƒfƒ‚‚ÌˆÀ’è«‚Æƒtƒ@ƒCƒ‹ƒTƒCƒY‚É‚ÍƒgƒŒ[ƒhƒIƒt‚ÌŠÖŒW‚ª‚ ‚éB
-	ƒtƒ@ƒCƒ‹ƒTƒCƒY§–ñ‚ª‚ ‚é’†‚ÅˆÀ’è«‚Ì‚‚¢ƒfƒ‚‚ðì‚é‚Ì‚Í‚»‚ê‚¾‚¯“ïˆÕ“x‚à
-	‚‚¢‚±‚Æ‚ðˆÓ–¡‚µ•]‰¿‚ª‚‚­‚È‚éB‹t‚ÉˆÀ’è«‚Ì’á‚¢ƒfƒ‚‚Í•]‰¿‚ª’á‚­‚È‚éB
-	‚Â‚Ü‚è TINYIMPORT ‚ðŽg‚¤‚ÆA«—ˆ‚ÌˆÀ’è«‚¾‚¯‚Å‚È‚­ƒfƒ‚‚Ì•]‰¿‚à‹]µ‚É‚È‚éB
+	TINYIMPORT ï¿½ï¿½ï¿½gï¿½ï¿½ï¿½ÆAï¿½tï¿½@ï¿½Cï¿½ï¿½ï¿½Tï¿½Cï¿½Yï¿½Å—Lï¿½ï¿½ï¿½É‚È‚é‚ªï¿½ï¿½ï¿½ï¿½ï¿½Ìˆï¿½ï¿½è«ï¿½ÍŽï¿½ï¿½ï¿½ï¿½ï¿½B
+	ï¿½ï¿½ï¿½ï¿½ï¿½Ìˆï¿½ï¿½è«ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ‚ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ‚ÍAï¿½ï¿½ï¿½ï¿½ï¿½ï¿½gï¿½ï¿½ï¿½ï¿½ï¿½fï¿½ï¿½ï¿½ï¿½ windows update ï¿½ï¿½É‚ï¿½
+	ï¿½Ù‚Ú“ï¿½ï¿½ì‚µï¿½È‚ï¿½ï¿½È‚é‚±ï¿½Æ‚ï¿½ï¿½Ó–ï¿½ï¿½ï¿½ï¿½ï¿½B
+	ï¿½ï¿½ï¿½Ì‚æ‚¤ï¿½ÉAï¿½fï¿½ï¿½ï¿½Ìˆï¿½ï¿½è«ï¿½Æƒtï¿½@ï¿½Cï¿½ï¿½ï¿½Tï¿½Cï¿½Yï¿½É‚Íƒgï¿½ï¿½ï¿½[ï¿½hï¿½Iï¿½tï¿½ÌŠÖŒWï¿½ï¿½ï¿½ï¿½ï¿½ï¿½B
+	ï¿½tï¿½@ï¿½Cï¿½ï¿½ï¿½Tï¿½Cï¿½Yï¿½ï¿½ï¿½ñ‚ª‚ï¿½ï¿½é’†ï¿½Åˆï¿½ï¿½è«ï¿½Ìï¿½ï¿½ï¿½ï¿½fï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì‚Í‚ï¿½ï¿½ê‚¾ï¿½ï¿½ï¿½ï¿½Õ“xï¿½ï¿½
+	ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æ‚ï¿½ï¿½Ó–ï¿½ï¿½ï¿½ï¿½]ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È‚ï¿½Bï¿½tï¿½Éˆï¿½ï¿½è«ï¿½Ì’á‚¢ï¿½fï¿½ï¿½ï¿½Í•]ï¿½ï¿½ï¿½ï¿½ï¿½á‚­ï¿½È‚ï¿½B
+	ï¿½Â‚Ü‚ï¿½ TINYIMPORT ï¿½ï¿½ï¿½gï¿½ï¿½ï¿½ÆAï¿½ï¿½ï¿½ï¿½ï¿½Ìˆï¿½ï¿½è«ï¿½ï¿½ï¿½ï¿½ï¿½Å‚È‚ï¿½ï¿½fï¿½ï¿½ï¿½Ì•]ï¿½ï¿½ï¿½ï¿½ï¿½]ï¿½ï¿½ï¿½É‚È‚ï¿½B
 
-	‚»‚ê‚Å‚à TINYIMPORT ‚ðŽg‚¢‚½‚¢ê‡‚ÍAˆÈ‰º‚ÌƒRƒƒ“ƒgƒAƒEƒg‚³‚ê‚½ƒR[ƒh‚ð
-	—LŒø‚É‚·‚ê‚Î—Ç‚¢i—vƒŒƒCƒAƒEƒg’²®jB‚½‚¾‚µ‘S‚­„§‚³‚ê‚È‚¢B
+	ï¿½ï¿½ï¿½ï¿½Å‚ï¿½ TINYIMPORT ï¿½ï¿½ï¿½gï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ê‡ï¿½ÍAï¿½È‰ï¿½ï¿½ÌƒRï¿½ï¿½ï¿½ï¿½ï¿½gï¿½Aï¿½Eï¿½gï¿½ï¿½ï¿½ê‚½ï¿½Rï¿½[ï¿½hï¿½ï¿½
+	ï¿½Lï¿½ï¿½ï¿½É‚ï¿½ï¿½ï¿½Î—Ç‚ï¿½ï¿½iï¿½vï¿½ï¿½ï¿½Cï¿½Aï¿½Eï¿½gï¿½ï¿½ï¿½ï¿½ï¿½jï¿½Bï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Sï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È‚ï¿½ï¿½B
 */
 #if 0
 		AUTOCHECKBOX "TINYIMPORT : Sacrifices compatibility. (Decrease the filesize around 75 bytes, but less future-proof.)",
@@ -730,14 +730,18 @@ STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 				DESCRIPTION_X + 0x10, DESCRIPTION_Y + 0x140, DIALOG_W, FONT_H
 #endif
 
-	LTEXT "Output file", IDC_DUMMY, DESCRIPTION_X, DESCRIPTION_Y + 0x140, DESCRIPTION_W, FONT_H
+	AUTOCHECKBOX "Use window mode instead of fullscreen.",
+		IDD_EXPORT_EXECUTABLE_USE_WINDOW_MODE,
+			DESCRIPTION_X, DESCRIPTION_Y + 0x140, DIALOG_W, FONT_H
+
+	LTEXT "Output file", IDC_DUMMY, DESCRIPTION_X, DESCRIPTION_Y + 0x150, DESCRIPTION_W, FONT_H
 	EDITTEXT
 		IDD_EXPORT_EXECUTABLE_OUTPUT_FILE,
-			DESCRIPTION_X + 0x28, EDITBOX_Y + 0x140, PATH_EDITTEXT_W, FONT_H,
+			DESCRIPTION_X + 0x28, EDITBOX_Y + 0x150, PATH_EDITTEXT_W, FONT_H,
 			ES_LEFT | ES_AUTOHSCROLL | WS_VISIBLE | WS_BORDER | WS_TABSTOP
 	PUSHBUTTON "Browse",
 		IDD_EXPORT_EXECUTABLE_BROWSE_OUTPUT_FILE,
-			DESCRIPTION_X + 0x28 + PATH_EDITTEXT_W, EDITBOX_Y + 0x140, PATH_BROWSE_BUTTON_W, FONT_H,
+			DESCRIPTION_X + 0x28 + PATH_EDITTEXT_W, EDITBOX_Y + 0x150, PATH_BROWSE_BUTTON_W, FONT_H,
 			WS_CHILD | WS_VISIBLE | WS_TABSTOP
 }
 

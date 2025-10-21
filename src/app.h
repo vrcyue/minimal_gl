@@ -307,6 +307,12 @@ void AppExportExecutableSetEnableSoundDispatchWaitFlag(bool flag);
 /* exe エクスポート : サウンドディスパッチのウェイト実行フラグの取得 */
 bool AppExportExecutableGetEnableSoundDispatchWaitFlag();
 
+/* exe エクスポート : ウィンドウモード使用フラグの設定 */
+void AppExportExecutableSetUseWindowModeFlag(bool flag);
+
+/* exe エクスポート : ウィンドウモード使用フラグの取得 */
+bool AppExportExecutableGetUseWindowModeFlag();
+
 /* exe エクスポート : ShaderMinifier の field-names 有効化フラグの設定 */
 void AppExportExecutableSetShaderMinifierOptionsEnableFieldNames(bool flag);
 

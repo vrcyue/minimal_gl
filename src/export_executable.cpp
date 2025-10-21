@@ -1019,7 +1019,8 @@ bool ExportExecutableSub(
 					"/DARG_ENABLE_SOUND_DISPATCH_WAIT=%d "				/* arg 16 */
 					"/DARG_USE_TINYHEADER=%d "							/* arg 17 */
 					"/DARG_USE_TINYIMPORT=%d "							/* arg 18 */
-					"/I\"%s\" "											/* arg 19 */
+					"/DARG_USE_WINDOW_MODE=%d "							/* arg 19 */
+					"/I\"%s\" "											/* arg 20 */
 					"main.cpp || exit /b 2\n"
 #else
 				/* main.asm -> main.obj */
@@ -1043,6 +1044,7 @@ bool ExportExecutableSub(
 					"/DARG_ENABLE_SOUND_DISPATCH_WAIT=%d "				/* arg 16 */
 					"/DARG_USE_TINYHEADER=%d "							/* arg 17 */
 					"/DARG_USE_TINYIMPORT=%d "							/* arg 18 */
+					"/DARG_USE_WINDOW_MODE=%d "							/* arg 19 */
 					"main.asm || exit /b 2\n"
 
 				/* resource.cpp -> resource.obj */
@@ -1083,21 +1085,22 @@ bool ExportExecutableSub(
 				executableExportSettings->enableSoundDispatchWait? 1:0,			/* arg 16 */
 				executableExportSettings->crinklerOptions.useTinyHeader? 1:0,	/* arg 17 */
 				executableExportSettings->crinklerOptions.useTinyImport? 1:0,	/* arg 18 */
+				executableExportSettings->useWindowMode? 1:0,					/* arg 19 */
 #if USE_MAIN_CPP
-				workDirName														/* arg 19 */
+				workDirName														/* arg 20 */
 #else
-				renderSettings->enableSwapIntervalControl? 1:0,					/* arg 19 */
-				renderSettings->enableBackBuffer? 1:0,							/* arg 20 */
-				enableFrameCountUniform? 1:0,									/* arg 21 */
-				renderSettings->enableMipmapGeneration? 1:0,					/* arg 22 */
-				numMipmapLevels,												/* arg 23 */
-				numRenderTargets,												/* arg 24 */
-				renderSettings->pixelFormat,									/* arg 25 */
-				renderSettings->textureFilter,									/* arg 26 */
-				renderSettings->textureWrap,									/* arg 27 */
-				executableExportSettings->enableSoundDispatchWait? 1:0,			/* arg 28 */
-				executableExportSettings->crinklerOptions.useTinyHeader? 1:0,	/* arg 29 */
-				executableExportSettings->crinklerOptions.useTinyImport? 1:0	/* arg 30 */
+				renderSettings->enableSwapIntervalControl? 1:0,					/* arg 20 */
+				renderSettings->enableBackBuffer? 1:0,							/* arg 21 */
+				enableFrameCountUniform? 1:0,									/* arg 22 */
+				renderSettings->enableMipmapGeneration? 1:0,					/* arg 23 */
+				numMipmapLevels,												/* arg 24 */
+				numRenderTargets,												/* arg 25 */
+				renderSettings->pixelFormat,									/* arg 26 */
+				renderSettings->textureFilter,									/* arg 27 */
+				renderSettings->textureWrap,									/* arg 28 */
+				executableExportSettings->enableSoundDispatchWait? 1:0,			/* arg 29 */
+				executableExportSettings->crinklerOptions.useTinyHeader? 1:0,	/* arg 30 */
+				executableExportSettings->crinklerOptions.useTinyImport? 1:0	/* arg 31 */
 #endif
 			);
 

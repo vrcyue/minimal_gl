@@ -834,11 +834,13 @@ void
 entrypoint(
 	void
 ){
+#if !ARG_USE_WINDOW_MODE
 	/* フルスクリーン化 */
 	ChangeDisplaySettings(
 		/* DEVMODEA *lpDevMode */	&s_screenSettings,
 		/* DWORD    dwFlags */		CDS_FULLSCREEN
 	);
+#endif
 
 	/*
 		ウィンドウ作成
@@ -851,11 +853,19 @@ entrypoint(
 		/* DWORD dwExStyle */		0,
 		/* LPCTSTR lpClassName */	(LPCSTR)0xC018	/* "edit" を意味する ATOM */,
 		/* LPCTSTR lpWindowName */	NULL,
+#if ARG_USE_WINDOW_MODE
+		/* DWORD dwStyle */			WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+		/* int x */					CW_USEDEFAULT,
+		/* int y */					CW_USEDEFAULT,
+		/* int nWidth */			SCREEN_WIDTH,
+		/* int nHeight */			SCREEN_HEIGHT,
+#else
 		/* DWORD dwStyle */			WS_POPUP | WS_VISIBLE | WS_MAXIMIZE,
 		/* int x */					0,
 		/* int y */					0,
 		/* int nWidth */			0,
 		/* int nHeight */			0,
+#endif
 		/* HWND hWndParent */		(HWND)NULL,
 		/* HMENU hMenu */			(HMENU)NULL,
 		/* HINSTANCE hInstance */	(HINSTANCE)NULL,

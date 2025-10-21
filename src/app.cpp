@@ -119,6 +119,7 @@ static ExecutableExportSettings s_executableExportSettings = {
 	/* int numSoundBufferSamplesPerDispatch; */							NUM_SOUND_BUFFER_SAMPLES_PER_DISPATCH,
 	/* bool enableFrameCountUniform; */									true,
 	/* bool enableSoundDispatchWait; */									true,
+	/* bool useWindowMode; */											false,
 	/* struct ShaderMinifierOptions { */								{
 	/*  bool enableFieldNames; */											false,
 	/*  int fieldNameIndex; */												0,
@@ -984,6 +985,12 @@ void AppExportExecutableSetEnableSoundDispatchWaitFlag(bool flag){
 }
 bool AppExportExecutableGetEnableSoundDispatchWaitFlag(){
 	return s_executableExportSettings.enableSoundDispatchWait;
+}
+void AppExportExecutableSetUseWindowModeFlag(bool flag){
+	s_executableExportSettings.useWindowMode = flag;
+}
+bool AppExportExecutableGetUseWindowModeFlag(){
+	return s_executableExportSettings.useWindowMode;
 }
 void AppExportExecutableSetShaderMinifierOptionsEnableFieldNames(bool flag){
 	s_executableExportSettings.shaderMinifierOptions.enableFieldNames = flag;
