@@ -12,8 +12,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #include "config.h"
+
+#ifndef ENABLE_PIPELINE_DEBUG_LOG
+#define ENABLE_PIPELINE_DEBUG_LOG 1
+#endif
 
 
 /* fopen 等のセキュアでないレガシー API に対する警告の抑制 */
@@ -219,6 +224,72 @@ static void *PipelineMemset(void *dst, int value, size_t size){
 extern "C" void *__cdecl memset(void *dst, int value, size_t size){
 	return PipelineMemset(dst, value, size);
 }
+
+#if ENABLE_PIPELINE_DEBUG_LOG
+static HANDLE PipelineDebugGetFileHandle(){
+	static HANDLE s_handle = INVALID_HANDLE_VALUE;
+	if (s_handle == INVALID_HANDLE_VALUE) {
+		s_handle = CreateFileA(
+			"pipeline_debug_log.txt",
+			FILE_APPEND_DATA,
+			FILE_SHARE_READ,
+			NULL,
+			OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL,
+			NULL
+		);
+		if (s_handle != INVALID_HANDLE_VALUE) {
+			SetFilePointer(s_handle, 0, NULL, FILE_END);
+		}
+	}
+	return s_handle;
+}
+
+static void PipelineDebugPrint(const char *format, ...){
+	HANDLE fileHandle = PipelineDebugGetFileHandle();
+	if (fileHandle == INVALID_HANDLE_VALUE) {
+		return;
+}
+
+	char buffer[512];
+	va_list args;
+	va_start(args, format);
+	int length = wvsprintfA(buffer, format, args);
+	va_end(args);
+	if (length <= 0) {
+		return;
+	}
+
+	DWORD bytesWritten = 0;
+	WriteFile(
+		fileHandle,
+		buffer,
+		(DWORD)length,
+		&bytesWritten,
+		NULL
+	);
+}
+static int s_debugLogRemainingFrames = 32;
+static int s_debugLogLastFrame = -1;
+static bool PipelineDebugShouldLog(int frameCount){
+	if (s_debugLogRemainingFrames <= 0) {
+		return false;
+	}
+	if (frameCount != s_debugLogLastFrame) {
+		s_debugLogLastFrame = frameCount;
+		--s_debugLogRemainingFrames;
+	}
+	return true;
+}
+#else
+static void PipelineDebugPrint(const char *format, ...){
+	(void)format;
+}
+static bool PipelineDebugShouldLog(int frameCount){
+	(void)frameCount;
+	return false;
+}
+#endif
 
 static bool PipelineProgramHasUniform(
 	GLuint programId,
@@ -474,6 +545,11 @@ static bool PipelineExecuteComputePass(
 	GLuint boundImageUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
 	GLenum boundImageAccess[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
 	int numBoundImageUnits = 0;
+#if ENABLE_PIPELINE_DEBUG_LOG
+	bool debugLog = PipelineDebugShouldLog(frameCount);
+#else
+	bool debugLog = false;
+#endif
 
 	glExtUseProgram(s_graphicsComputeProgramId);
 	if (s_computePipelinePassUniformAvailable) {
@@ -485,6 +561,12 @@ static bool PipelineExecuteComputePass(
 		GLuint textureId = PipelineAcquireResourceTexture(binding->resourceIndex, frameCount, binding->historyOffset);
 		const PipelineResource *resource = &pipeline->resources[binding->resourceIndex];
 		if (textureId == 0 || resource == NULL) {
+#if ENABLE_PIPELINE_DEBUG_LOG
+			if (debugLog) {
+				PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" failed: input %d resourceIndex=%d textureId=%u resource=%p\n",
+					frameCount, pass->name, inputIndex, binding->resourceIndex, textureId, (const void*)resource);
+			}
+#endif
 			return false;
 		}
 		GLenum internalformat = defaultInternalformat;
@@ -498,6 +580,17 @@ static bool PipelineExecuteComputePass(
 				PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
 				boundSamplerUnits[numBoundSamplerUnits++] = samplerUnit;
 				++samplerUnitCount;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					int historyLength = resource->historyLength > 0 ? resource->historyLength : 1;
+					int baseIndex = historyLength > 0 ? (frameCount % historyLength) : 0;
+					int resolvedIndex = baseIndex + binding->historyOffset;
+					while (resolvedIndex < 0) resolvedIndex += historyLength;
+					if (historyLength > 0) resolvedIndex %= historyLength;
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" sampler unit %u historyOffset=%d resolvedIndex=%d textureId=%u\n",
+						frameCount, pass->name, inputIndex, resource->id, samplerUnit, binding->historyOffset, resolvedIndex, textureId);
+				}
+#endif
 			} break;
 			case PipelineResourceAccessImageRead: {
 				GLenum format = internalformat;
@@ -506,8 +599,25 @@ static bool PipelineExecuteComputePass(
 				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
 				imageFormats[numBoundImageUnits] = format;
 				++numBoundImageUnits;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					int historyLength = resource->historyLength > 0 ? resource->historyLength : 1;
+					int baseIndex = historyLength > 0 ? (frameCount % historyLength) : 0;
+					int resolvedIndex = baseIndex + binding->historyOffset;
+					while (resolvedIndex < 0) resolvedIndex += historyLength;
+					if (historyLength > 0) resolvedIndex %= historyLength;
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u READ historyOffset=%d resolvedIndex=%d textureId=%u\n",
+						frameCount, pass->name, inputIndex, resource->id, numBoundImageUnits - 1, binding->historyOffset, resolvedIndex, textureId);
+				}
+#endif
 			} break;
 			default: {
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" unsupported input access %d\n",
+						frameCount, pass->name, (int)binding->access);
+				}
+#endif
 				return false;
 			} break;
 		}
@@ -519,6 +629,12 @@ static bool PipelineExecuteComputePass(
 		GLuint textureId = PipelineAcquireResourceTexture(binding->resourceIndex, frameCount, binding->historyOffset);
 		const PipelineResource *resource = &pipeline->resources[binding->resourceIndex];
 		if (textureId == 0 || resource == NULL) {
+#if ENABLE_PIPELINE_DEBUG_LOG
+			if (debugLog) {
+				PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" failed: output %d resourceIndex=%d textureId=%u resource=%p\n",
+					frameCount, pass->name, outputIndex, binding->resourceIndex, textureId, (const void*)resource);
+			}
+#endif
 			return false;
 		}
 		GLenum internalformat = defaultInternalformat;
@@ -541,8 +657,27 @@ static bool PipelineExecuteComputePass(
 				imageFormats[numBoundImageUnits] = internalformat;
 				++numBoundImageUnits;
 				hasWritableOutput = true;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					int historyLength = resource->historyLength > 0 ? resource->historyLength : 1;
+					int baseIndex = historyLength > 0 ? (frameCount % historyLength) : 0;
+					int resolvedIndex = baseIndex + binding->historyOffset;
+					while (resolvedIndex < 0) resolvedIndex += historyLength;
+					if (historyLength > 0) resolvedIndex %= historyLength;
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d access=%s historyOffset=%d resolvedIndex=%d textureId=%u\n",
+						frameCount, pass->name, outputIndex, resource->id, imageUnit,
+						(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
+						binding->historyOffset, resolvedIndex, textureId);
+				}
+#endif
 			} break;
 			default: {
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" unsupported output access %d\n",
+						frameCount, pass->name, (int)binding->access);
+				}
+#endif
 				return false;
 			} break;
 		}
@@ -557,6 +692,12 @@ static bool PipelineExecuteComputePass(
 			glBindTexture(GL_TEXTURE_2D, 0);
 		}
 		glExtActiveTexture(GL_TEXTURE0);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" aborted: no writable outputs\n",
+				frameCount, pass->name);
+		}
+#endif
 		return false;
 	}
 
@@ -591,6 +732,12 @@ static bool PipelineExecuteComputePass(
 	if (numGroupsX == 0) numGroupsX = 1;
 	if (numGroupsY == 0) numGroupsY = 1;
 	if (numGroupsZ == 0) numGroupsZ = 1;
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" dispatch (%u,%u,%u) target=%ux%u\n",
+			frameCount, pass->name, numGroupsX, numGroupsY, numGroupsZ, targetWidth, targetHeight);
+	}
+#endif
 
 	glExtDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
 	glExtMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
@@ -633,6 +780,11 @@ static bool PipelineExecuteFragmentPass(
 	int numDrawBuffers = 0;
 	GLuint targetWidth = SCREEN_WIDTH;
 	GLuint targetHeight = SCREEN_HEIGHT;
+#if ENABLE_PIPELINE_DEBUG_LOG
+	bool debugLog = PipelineDebugShouldLog(frameCount);
+#else
+	bool debugLog = false;
+#endif
 
 	for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
 		const PipelineResourceBinding *binding = &pass->outputs[outputIndex];
@@ -644,6 +796,12 @@ static bool PipelineExecuteFragmentPass(
 		if (textureId == 0 || state->initialized == false) {
 			glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glExtDeleteFramebuffers(1, &framebuffer);
+#if ENABLE_PIPELINE_DEBUG_LOG
+			if (debugLog) {
+				PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" failed: output %d resourceIndex=%d textureId=%u initialized=%d\n",
+					frameCount, pass->name, outputIndex, binding->resourceIndex, textureId, state ? state->initialized : 0);
+			}
+#endif
 			return false;
 		}
 		if (numDrawBuffers == 0) {
@@ -654,11 +812,24 @@ static bool PipelineExecuteFragmentPass(
 		glExtFramebufferTexture(GL_FRAMEBUFFER, attachment, textureId, 0);
 		drawBuffers[numDrawBuffers] = attachment;
 		++numDrawBuffers;
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			const PipelineResource *resource = &pipeline->resources[binding->resourceIndex];
+			PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" output %d \"%s\" attachment=%d textureId=%u historyOffset=%d\n",
+				frameCount, pass->name, outputIndex, resource->id, attachment, textureId, binding->historyOffset);
+		}
+#endif
 	}
 
 	if (numDrawBuffers == 0) {
 		glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glExtDeleteFramebuffers(1, &framebuffer);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" aborted: no draw buffers\n",
+				frameCount, pass->name);
+		}
+#endif
 		return false;
 	}
 
@@ -666,6 +837,12 @@ static bool PipelineExecuteFragmentPass(
 	if (glExtCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 		glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glExtDeleteFramebuffers(1, &framebuffer);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" aborted: framebuffer incomplete\n",
+				frameCount, pass->name);
+		}
+#endif
 		return false;
 	}
 
@@ -690,6 +867,12 @@ static bool PipelineExecuteFragmentPass(
 		if (textureId == 0 || resource == NULL) {
 			glExtBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glExtDeleteFramebuffers(1, &framebuffer);
+#if ENABLE_PIPELINE_DEBUG_LOG
+			if (debugLog) {
+				PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" failed: input %d resourceIndex=%d textureId=%u resource=%p\n",
+					frameCount, pass->name, inputIndex, binding->resourceIndex, textureId, (const void*)resource);
+			}
+#endif
 			return false;
 		}
 		if (binding->access != PipelineResourceAccessSampled && binding->access != PipelineResourceAccessHistoryRead) {
@@ -715,6 +898,17 @@ static bool PipelineExecuteFragmentPass(
 		if (samplerUnit >= numBoundSamplerUnits) {
 			samplerUnits[numBoundSamplerUnits++] = samplerUnit;
 		}
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			int historyLength = resource->historyLength > 0 ? resource->historyLength : 1;
+			int baseIndex = historyLength > 0 ? (frameCount % historyLength) : 0;
+			int resolvedIndex = baseIndex + binding->historyOffset;
+			while (resolvedIndex < 0) resolvedIndex += historyLength;
+			if (historyLength > 0) resolvedIndex %= historyLength;
+			PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" input %d \"%s\" sampler unit %u historyOffset=%d resolvedIndex=%d textureId=%u\n",
+				frameCount, pass->name, inputIndex, resource->id, samplerUnit, binding->historyOffset, resolvedIndex, textureId);
+		}
+#endif
 	}
 	glExtActiveTexture(GL_TEXTURE0);
 
@@ -730,6 +924,12 @@ static bool PipelineExecuteFragmentPass(
 		-1.0f,  1.0f,
 		 1.0f,  1.0f
 	};
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" drawing quad target=%ux%u numInputs=%d numDrawBuffers=%d\n",
+			frameCount, pass->name, targetWidth, targetHeight, pass->numInputs, numDrawBuffers);
+	}
+#endif
 	glExtVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), vertices);
 	glExtEnableVertexAttribArray(0);
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -759,9 +959,20 @@ static bool PipelineExecutePresentPass(
 ){
 	if (pipeline == NULL || pass == NULL) return false;
 	if (pass->numInputs <= 0) return false;
+#if ENABLE_PIPELINE_DEBUG_LOG
+	bool debugLog = PipelineDebugShouldLog(frameCount);
+#else
+	bool debugLog = false;
+#endif
 	GLuint textureId = PipelineAcquireResourceTexture(pass->inputs[0].resourceIndex, frameCount, pass->inputs[0].historyOffset);
 	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[pass->inputs[0].resourceIndex];
 	if (textureId == 0 || state->initialized == false) {
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d present pass \"%s\" failed: input resourceIndex=%d textureId=%u initialized=%d\n",
+				frameCount, pass->name, pass->inputs[0].resourceIndex, textureId, state ? state->initialized : 0);
+		}
+#endif
 		return false;
 	}
 	GLuint readFramebuffer = 0;
@@ -771,8 +982,20 @@ static bool PipelineExecutePresentPass(
 	if (glExtCheckFramebufferStatus(GL_READ_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
 		glExtBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 		glExtDeleteFramebuffers(1, &readFramebuffer);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d present pass \"%s\" aborted: source framebuffer incomplete textureId=%u\n",
+				frameCount, pass->name, textureId);
+		}
+#endif
 		return false;
 	}
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		PipelineDebugPrint("[Pipeline Debug] frame %d present pass \"%s\" blitting from textureId=%u size=%dx%d\n",
+			frameCount, pass->name, textureId, state->width, state->height);
+	}
+#endif
 	glExtBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 	glExtBlitNamedFramebuffer(
 		readFramebuffer,
@@ -784,6 +1007,12 @@ static bool PipelineExecutePresentPass(
 	);
 	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glExtDeleteFramebuffers(1, &readFramebuffer);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		PipelineDebugPrint("[Pipeline Debug] frame %d present pass \"%s\" completed blit to back buffer\n",
+			frameCount, pass->name);
+	}
+#endif
 	return true;
 }
 
