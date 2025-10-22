@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "config.h"
 
@@ -134,6 +135,7 @@ static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESO
 static int s_activePipelinePassIndex = -1;
 static GLint s_fragmentPipelinePassUniformLocation = -1;
 static GLint s_computePipelinePassUniformLocation = -1;
+static bool s_loggedPipelineExecutionFailure = false;
 
 /*=============================================================================
 ▼	各種リソースの取り込み
@@ -202,6 +204,20 @@ static void *PipelineMemcpy(void *dst, const void *src, size_t size){
 		d[i] = s[i];
 	}
 	return dst;
+}
+
+static void *PipelineMemset(void *dst, int value, size_t size){
+	if (dst == NULL) return dst;
+	unsigned char *d = (unsigned char*)dst;
+	unsigned char v = (unsigned char)value;
+	for (size_t i = 0; i < size; ++i) {
+		d[i] = v;
+	}
+	return dst;
+}
+
+extern "C" void *__cdecl memset(void *dst, int value, size_t size){
+	return PipelineMemset(dst, value, size);
 }
 
 static void PipelineDeleteRuntimeResource(PipelineRuntimeResourceState *state){
@@ -474,10 +490,19 @@ static bool PipelineExecuteComputePass(
 		PipelineGetPixelFormatInfo(resource->pixelFormat, &internalformat, NULL, NULL);
 		switch (binding->access) {
 			case PipelineResourceAccessImageWrite: {
+				bool hasMatchingInput = false;
+				for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+					const PipelineResourceBinding *inputBinding = &pass->inputs[inputIndex];
+					if (inputBinding->resourceIndex == binding->resourceIndex) {
+						hasMatchingInput = true;
+						break;
+					}
+				}
+				GLenum imageAccess = hasMatchingInput ? GL_WRITE_ONLY : GL_READ_WRITE;
 				int imageUnit = numBoundImageUnits;
-				glExtBindImageTexture(imageUnit, textureId, 0, GL_FALSE, 0, GL_WRITE_ONLY, internalformat);
+				glExtBindImageTexture(imageUnit, textureId, 0, GL_FALSE, 0, imageAccess, internalformat);
 				boundImageUnits[numBoundImageUnits] = imageUnit;
-				boundImageAccess[numBoundImageUnits] = GL_WRITE_ONLY;
+				boundImageAccess[numBoundImageUnits] = imageAccess;
 				imageFormats[numBoundImageUnits] = internalformat;
 				++numBoundImageUnits;
 				hasWritableOutput = true;
@@ -1128,9 +1153,19 @@ entrypoint(
 					executed = false;
 				} break;
 			}
-			(void)executed;
-			s_activePipelinePassIndex = -1;
-		}
+				if (!executed && s_loggedPipelineExecutionFailure == false) {
+					char debugMessage[256];
+					wsprintfA(
+						debugMessage,
+						"[Pipeline Warning] Pass \"%s\" (type %d) failed to execute.\n",
+						pass->name,
+						(int)pass->type
+					);
+					OutputDebugStringA(debugMessage);
+					s_loggedPipelineExecutionFailure = true;
+				}
+				s_activePipelinePassIndex = -1;
+			}
 		s_activePipelinePassIndex = -1;
 
 		SwapBuffers(

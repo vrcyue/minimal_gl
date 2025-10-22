@@ -931,6 +931,45 @@ static bool DeserializePass(
     return true;
 }
 
+static void PipelineDescriptionEmitWarnings(const PipelineDescription *description){
+    if (description == NULL) {
+        return;
+    }
+    for (int passIndex = 0; passIndex < description->numPasses; ++passIndex) {
+        const PipelinePass *pass = &description->passes[passIndex];
+        if (pass->type != PipelinePassTypeCompute) {
+            continue;
+        }
+        for (int outputIndex = 0; outputIndex < pass->numOutputs; ++outputIndex) {
+            const PipelineResourceBinding *output = &pass->outputs[outputIndex];
+            if (output->access != PipelineResourceAccessImageWrite) {
+                continue;
+            }
+            bool hasMatchingInput = false;
+            for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
+                const PipelineResourceBinding *input = &pass->inputs[inputIndex];
+                if (input->resourceIndex == output->resourceIndex) {
+                    hasMatchingInput = true;
+                    break;
+                }
+            }
+            if (!hasMatchingInput) {
+                const PipelineResource *resource = NULL;
+                if (output->resourceIndex >= 0 && output->resourceIndex < description->numResources) {
+                    resource = &description->resources[output->resourceIndex];
+                }
+                const char *resourceId = (resource != NULL && resource->id[0] != '\0') ? resource->id : "(unnamed)";
+                printf(
+                    "[Pipeline Warning] compute pass \"%s\" writes to resource \"%s\" without an input binding. "
+                    "Exported executables will fall back to GL_READ_WRITE for this resource at runtime; add a history_read input if the shader needs the previous contents (otherwise you can ignore this warning).\n",
+                    pass->name,
+                    resourceId
+                );
+            }
+        }
+    }
+}
+
 bool PipelineDescriptionDeserializeFromJson(
     PipelineDescription *description,
     cJSON *jsonRoot,
@@ -1019,6 +1058,7 @@ bool PipelineDescriptionDeserializeFromJson(
         }
     }
 
+    PipelineDescriptionEmitWarnings(description);
     return true;
 }
 
