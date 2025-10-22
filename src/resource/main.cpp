@@ -133,8 +133,8 @@ typedef struct {
 static PipelineDescription s_pipelineDescription = {0};
 static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESOURCES] = {{0}};
 static int s_activePipelinePassIndex = -1;
-static GLint s_fragmentPipelinePassUniformLocation = -1;
-static GLint s_computePipelinePassUniformLocation = -1;
+static bool s_fragmentPipelinePassUniformAvailable = false;
+static bool s_computePipelinePassUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
 
 /*=============================================================================
@@ -218,6 +218,41 @@ static void *PipelineMemset(void *dst, int value, size_t size){
 
 extern "C" void *__cdecl memset(void *dst, int value, size_t size){
 	return PipelineMemset(dst, value, size);
+}
+
+static bool PipelineProgramHasUniform(
+	GLuint programId,
+	GLint location,
+	GLenum typeEnum
+){
+	if (programId == 0) {
+		return false;
+	}
+	GLint numActiveUniforms = 0;
+	glExtGetProgramInterfaceiv(
+		/* GLuint program */			programId,
+		/* GLenum programInterface */	GL_UNIFORM,
+		/* GLenum pname */				GL_ACTIVE_RESOURCES,
+		/* GLint *params */				&numActiveUniforms
+	);
+	GLenum properties[2] = {GL_TYPE, GL_LOCATION};
+	GLint values[2] = {0, 0};
+	for (int index = 0; index < numActiveUniforms; ++index) {
+		glExtGetProgramResourceiv(
+			/* GLuint program */			programId,
+			/* GLenum programInterface */	GL_UNIFORM,
+			/* GLuint index */				(GLuint)index,
+			/* GLsizei propCount */			2,
+			/* const GLenum *props */		properties,
+			/* GLsizei bufSize */			2,
+			/* GLsizei *length */			NULL,
+			/* GLint *params */				values
+		);
+		if (values[0] == (GLint)typeEnum && values[1] == location) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void PipelineDeleteRuntimeResource(PipelineRuntimeResourceState *state){
@@ -441,8 +476,8 @@ static bool PipelineExecuteComputePass(
 	int numBoundImageUnits = 0;
 
 	glExtUseProgram(s_graphicsComputeProgramId);
-	if (s_computePipelinePassUniformLocation >= 0) {
-		glExtUniform1i(s_computePipelinePassUniformLocation, s_activePipelinePassIndex);
+	if (s_computePipelinePassUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
 
 	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
@@ -586,8 +621,8 @@ static bool PipelineExecuteFragmentPass(
 	if (fragmentProgramId == 0) return false;
 
 	glExtUseProgram(fragmentProgramId);
-	if (s_fragmentPipelinePassUniformLocation >= 0) {
-		glExtUniform1i(s_fragmentPipelinePassUniformLocation, s_activePipelinePassIndex);
+	if (s_fragmentPipelinePassUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
 
 	GLuint framebuffer = 0;
@@ -1071,12 +1106,13 @@ entrypoint(
 		}
 	}
 	if (s_graphicsComputeProgramId != 0) {
-		s_computePipelinePassUniformLocation = glExtGetUniformLocation(
+		s_computePipelinePassUniformAvailable = PipelineProgramHasUniform(
 			s_graphicsComputeProgramId,
-			"g_pipelinePassIndex"
+			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
+			GL_INT
 		);
 	} else {
-		s_computePipelinePassUniformLocation = -1;
+		s_computePipelinePassUniformAvailable = false;
 	}
 
 	/* フラグメントシェーダの作成 */
@@ -1091,12 +1127,13 @@ entrypoint(
 		/* GLuint program */	graphicsFsProgramId
 	);
 	if (graphicsFsProgramId != 0) {
-		s_fragmentPipelinePassUniformLocation = glExtGetUniformLocation(
+		s_fragmentPipelinePassUniformAvailable = PipelineProgramHasUniform(
 			graphicsFsProgramId,
-			"g_pipelinePassIndex"
+			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
+			GL_INT
 		);
 	} else {
-		s_fragmentPipelinePassUniformLocation = -1;
+		s_fragmentPipelinePassUniformAvailable = false;
 	}
 
 	PipelineMemcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));

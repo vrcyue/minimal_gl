@@ -50,6 +50,7 @@
 #define UNIFORM_LOCATION_TIME					2
 #define UNIFORM_LOCATION_RESO					3
 #define UNIFORM_LOCATION_MOUSE_BUTTONS			5
+#define UNIFORM_LOCATION_PIPELINE_PASS_INDEX	9
 
 
 /* glTexImage2D の代わりに glExtTexStorage2D を使うか */

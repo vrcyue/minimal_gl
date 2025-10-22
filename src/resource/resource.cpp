@@ -44,6 +44,8 @@ char g_concatenatedString_align0[] =
 	"glCreateShaderProgramv\0"		/* Generate の ate が 既出ワード */
 	"glUseProgram\0"				/* Program が既出ワード */
 	"glGetUniformLocation\0"		/* Program が既出ワード */
+	"glGetProgramInterfaceiv\0"		/* Program が既出ワード */
+	"glGetProgramResourceiv\0"		/* Program が既出ワード */
 	"glGetProgramiv\0"				/* Program が既出ワード */
 	"glDeleteProgram\0"				/* Program が既出ワード */
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
@@ -97,6 +99,8 @@ typedef enum {
 	GlExtCreateShaderProgramv,
 	GlExtUseProgram,
 	GlExtGetUniformLocation,
+	GlExtGetProgramInterfaceiv,
+	GlExtGetProgramResourceiv,
 	GlExtGetProgramiv,
 	GlExtDeleteProgram,
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
@@ -138,6 +142,8 @@ typedef enum {
 #define glExtCreateShaderProgramv	((PFNGLCREATESHADERPROGRAMVPROC)s_glExtFunctions[GlExtCreateShaderProgramv])
 #define glExtUseProgram				((PFNGLUSEPROGRAMPROC)          s_glExtFunctions[GlExtUseProgram])
 #define glExtGetUniformLocation		((PFNGLGETUNIFORMLOCATIONPROC)  s_glExtFunctions[GlExtGetUniformLocation])
+#define glExtGetProgramInterfaceiv	((PFNGLGETPROGRAMINTERFACEIVPROC)s_glExtFunctions[GlExtGetProgramInterfaceiv])
+#define glExtGetProgramResourceiv	((PFNGLGETPROGRAMRESOURCEIVPROC)s_glExtFunctions[GlExtGetProgramResourceiv])
 #define glExtGetProgramiv			((PFNGLGETPROGRAMIVPROC)        s_glExtFunctions[GlExtGetProgramiv])
 #define glExtDeleteProgram			((PFNGLDELETEPROGRAMPROC)       s_glExtFunctions[GlExtDeleteProgram])
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
