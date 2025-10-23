@@ -530,6 +530,19 @@ static void PipelineCreateOrResizeResource(
 			glBindTexture(GL_TEXTURE_2D, state->textureIds[historyIndex]);
 			glTexImage2D(GL_TEXTURE_2D, 0, internalformat, width, height, 0, format, type, NULL);
 			PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+#if ENABLE_PIPELINE_DEBUG_LOG
+			PipelineDebugPrint("[Pipeline Debug] create resource \"%s\" historyIndex=%d textureId=%u size=%dx%d internalformat=0x%04X format=0x%04X type=0x%04X\n",
+				resource->id, historyIndex, state->textureIds[historyIndex], width, height, internalformat, format, type);
+			GLenum textureError = glGetError();
+			if (textureError != GL_NO_ERROR) {
+				PipelineDebugPrint("[Pipeline Debug] create resource \"%s\" historyIndex=%d glTexImage2D error=%s(0x%04X)\n",
+					resource->id, historyIndex, PipelineDebugGetGlErrorString(textureError), textureError);
+				while ((textureError = glGetError()) != GL_NO_ERROR) {
+					PipelineDebugPrint("[Pipeline Debug] create resource \"%s\" historyIndex=%d additional GL error=%s(0x%04X)\n",
+						resource->id, historyIndex, PipelineDebugGetGlErrorString(textureError), textureError);
+				}
+			}
+#endif
 		}
 		glBindTexture(GL_TEXTURE_2D, 0);
 
@@ -721,8 +734,8 @@ static bool PipelineExecuteComputePass(
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
 					int resolvedIndex = PipelineResolveHistoryIndex(inputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u READ historyOffset=%d resolvedIndex=%d textureId=%u\n",
-						frameCount, pass->name, inputIndex, resource->id, numBoundImageUnits - 1, binding->historyOffset, resolvedIndex, textureId);
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u READ historyOffset=%d resolvedIndex=%d textureId=%u internalformat=0x%04X\n",
+						frameCount, pass->name, inputIndex, resource->id, numBoundImageUnits - 1, binding->historyOffset, resolvedIndex, textureId, format);
 				}
 #endif
 			} break;
@@ -767,6 +780,33 @@ static bool PipelineExecuteComputePass(
 				}
 				GLenum imageAccess = GL_READ_WRITE;
 				int imageUnit = numBoundImageUnits;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				GLboolean isValidTexture = glIsTexture(textureId);
+				GLint levelInternalFormat = 0;
+				GLint levelWidth = 0;
+				GLint levelHeight = 0;
+				glBindTexture(GL_TEXTURE_2D, textureId);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &levelInternalFormat);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &levelWidth);
+				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &levelHeight);
+				glBindTexture(GL_TEXTURE_2D, 0);
+				GLenum texLevelError = glGetError();
+				if (debugLog) {
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" preBind texId=%u isTexture=%d levelInternalFormat=0x%04X size=%dx%d\n",
+						frameCount, pass->name, textureId, isValidTexture ? 1 : 0, levelInternalFormat, levelWidth, levelHeight);
+					if (texLevelError != GL_NO_ERROR) {
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" preBind texId=%u glGetTexLevelParameter error=%s(0x%04X)\n",
+							frameCount, pass->name, textureId, PipelineDebugGetGlErrorString(texLevelError), texLevelError);
+						while ((texLevelError = glGetError()) != GL_NO_ERROR) {
+							PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" additional GL error=%s(0x%04X)\n",
+								frameCount, pass->name, PipelineDebugGetGlErrorString(texLevelError), texLevelError);
+						}
+					}
+				}
+#else
+				glBindTexture(GL_TEXTURE_2D, textureId);
+				glBindTexture(GL_TEXTURE_2D, 0);
+#endif
 				glExtBindImageTexture(imageUnit, textureId, 0, GL_FALSE, 0, imageAccess, internalformat);
 				boundImageUnits[numBoundImageUnits] = imageUnit;
 				boundImageAccess[numBoundImageUnits] = imageAccess;
@@ -776,10 +816,10 @@ static bool PipelineExecuteComputePass(
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
 					int resolvedIndex = PipelineResolveHistoryIndex(outputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d access=%s historyOffset=%d resolvedIndex=%d textureId=%u matchingInput=%d\n",
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d access=%s historyOffset=%d resolvedIndex=%d textureId=%u matchingInput=%d internalformat=0x%04X\n",
 						frameCount, pass->name, outputIndex, resource->id, imageUnit,
 						(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
-						binding->historyOffset, resolvedIndex, textureId, hasMatchingInput ? 1 : 0);
+						binding->historyOffset, resolvedIndex, textureId, hasMatchingInput ? 1 : 0, internalformat);
 					debugOutputTextureId = textureId;
 					if (outputState && outputState->initialized) {
 						debugOutputWidth = outputState->width;
