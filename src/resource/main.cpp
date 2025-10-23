@@ -293,6 +293,22 @@ static const char *PipelineDebugGetGlErrorString(GLenum error){
 		default: return "GL_UNKNOWN_ERROR";
 	}
 }
+
+static int PipelineDebugDrainGlErrors(const char *label){
+	int drainedCount = 0;
+	GLenum error = GL_NO_ERROR;
+	while ((error = glGetError()) != GL_NO_ERROR) {
+		++drainedCount;
+		if (label != NULL) {
+			PipelineDebugPrint("[Pipeline Debug] %s pre-existing GL error=%s(0x%04X)\n",
+				label,
+				PipelineDebugGetGlErrorString(error),
+				error
+			);
+		}
+	}
+	return drainedCount;
+}
 #if ENABLE_PIPELINE_DEBUG_LOG
 static void PipelineDebugSampleTexture(GLuint textureId, int width, int height, const char *label){
 	if (textureId == 0 || label == NULL) return;
@@ -671,6 +687,18 @@ static bool PipelineExecuteComputePass(
 	int debugPrevHeight = 0;
 	int debugOutputWidth = 0;
 	int debugOutputHeight = 0;
+	struct PipelineDebugImageBindingEntry {
+		GLuint unit;
+		GLenum access;
+		GLuint textureId;
+		const char *resourceId;
+		int historyOffset;
+		int resolvedIndex;
+		GLint mipLevel;
+		bool isOutput;
+	};
+	PipelineDebugImageBindingEntry debugImageBindings[PIPELINE_MAX_BINDINGS_PER_PASS] = {};
+	int debugImageBindingCount = 0;
 #else
 	bool debugLog = false;
 #endif
@@ -679,6 +707,17 @@ static bool PipelineExecuteComputePass(
 	if (s_computePipelinePassUniformAvailable) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		char entryLabel[128];
+		wsprintfA(entryLabel, "frame %d compute pass \"%s\" ENTRY after glUseProgram", frameCount, pass->name);
+		int entryErrors = PipelineDebugDrainGlErrors(entryLabel);
+		if (entryErrors > 0) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" ENTRY: found %d pre-existing GL errors\n",
+				frameCount, pass->name, entryErrors);
+		}
+	}
+#endif
 
 	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
 		const PipelineResourceBinding *binding = &pass->inputs[inputIndex];
@@ -726,7 +765,17 @@ static bool PipelineExecuteComputePass(
 			} break;
 			case PipelineResourceAccessImageRead: {
 				GLenum format = internalformat;
-				glExtBindImageTexture(numBoundImageUnits, textureId, 0, GL_FALSE, 0, GL_READ_ONLY, format);
+				const GLint mipLevel = 0;
+				glExtBindImageTexture(numBoundImageUnits, textureId, mipLevel, GL_FALSE, 0, GL_READ_ONLY, format);
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					GLenum bindError = glGetError();
+					if (bindError != GL_NO_ERROR) {
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, READ_ONLY) error=%s(0x%04X)\n",
+							frameCount, pass->name, numBoundImageUnits, textureId, PipelineDebugGetGlErrorString(bindError), bindError);
+					}
+				}
+#endif
 				boundImageUnits[numBoundImageUnits] = numBoundImageUnits;
 				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
 				imageFormats[numBoundImageUnits] = format;
@@ -734,8 +783,21 @@ static bool PipelineExecuteComputePass(
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
 					int resolvedIndex = PipelineResolveHistoryIndex(inputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u READ historyOffset=%d resolvedIndex=%d textureId=%u internalformat=0x%04X\n",
-						frameCount, pass->name, inputIndex, resource->id, numBoundImageUnits - 1, binding->historyOffset, resolvedIndex, textureId, format);
+					int imageUnit = numBoundImageUnits - 1;
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u READ level=%d historyOffset=%d resolvedIndex=%d textureId=%u internalformat=0x%04X\n",
+						frameCount, pass->name, inputIndex, resource->id, imageUnit, mipLevel,
+						binding->historyOffset, resolvedIndex, textureId, format);
+					if (debugImageBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
+						debugImageBindings[debugImageBindingCount].unit = (GLuint)imageUnit;
+						debugImageBindings[debugImageBindingCount].access = GL_READ_ONLY;
+						debugImageBindings[debugImageBindingCount].textureId = textureId;
+						debugImageBindings[debugImageBindingCount].resourceId = resource->id;
+						debugImageBindings[debugImageBindingCount].historyOffset = binding->historyOffset;
+						debugImageBindings[debugImageBindingCount].resolvedIndex = resolvedIndex;
+						debugImageBindings[debugImageBindingCount].mipLevel = mipLevel;
+						debugImageBindings[debugImageBindingCount].isOutput = false;
+						++debugImageBindingCount;
+					}
 				}
 #endif
 			} break;
@@ -773,41 +835,73 @@ static bool PipelineExecuteComputePass(
 				bool hasMatchingInput = false;
 				for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
 					const PipelineResourceBinding *inputBinding = &pass->inputs[inputIndex];
-					if (inputBinding->resourceIndex == binding->resourceIndex) {
+					// Check if the same texture ID is bound, not just the same resource index
+					GLuint inputTextureId = PipelineAcquireResourceTexture(inputBinding->resourceIndex, frameCount, inputBinding->historyOffset);
+					if (inputTextureId == textureId) {
 						hasMatchingInput = true;
 						break;
 					}
 				}
-				GLenum imageAccess = GL_READ_WRITE;
+				// CRITICAL FIX: Always use GL_WRITE_ONLY to avoid GL_INVALID_OPERATION
+				// when reading from a different history slot of the same resource via sampler
+				GLenum imageAccess = GL_WRITE_ONLY;
+				const GLint mipLevel = 0;
 				int imageUnit = numBoundImageUnits;
 #if ENABLE_PIPELINE_DEBUG_LOG
-				GLboolean isValidTexture = glIsTexture(textureId);
-				GLint levelInternalFormat = 0;
-				GLint levelWidth = 0;
-				GLint levelHeight = 0;
-				glBindTexture(GL_TEXTURE_2D, textureId);
-				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &levelInternalFormat);
-				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &levelWidth);
-				glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &levelHeight);
-				glBindTexture(GL_TEXTURE_2D, 0);
-				GLenum texLevelError = glGetError();
 				if (debugLog) {
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" preBind texId=%u isTexture=%d levelInternalFormat=0x%04X size=%dx%d\n",
-						frameCount, pass->name, textureId, isValidTexture ? 1 : 0, levelInternalFormat, levelWidth, levelHeight);
+					char drainLabel[128];
+					wsprintfA(
+						drainLabel,
+						"frame %d compute pass \"%s\" texId=%u preBind drain",
+						frameCount,
+						pass->name,
+						textureId
+					);
+					int clearedErrors = PipelineDebugDrainGlErrors(drainLabel);
+					if (clearedErrors > 0) {
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" texId=%u cleared %d pre-existing GL errors before glGetTexLevelParameter\n",
+							frameCount, pass->name, textureId, clearedErrors);
+					}
+
+					GLboolean isValidTexture = glIsTexture(textureId);
+					GLint levelInternalFormat = 0;
+					GLint levelWidth = 0;
+					GLint levelHeight = 0;
+					glBindTexture(GL_TEXTURE_2D, textureId);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, mipLevel, GL_TEXTURE_INTERNAL_FORMAT, &levelInternalFormat);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, mipLevel, GL_TEXTURE_WIDTH, &levelWidth);
+					glGetTexLevelParameteriv(GL_TEXTURE_2D, mipLevel, GL_TEXTURE_HEIGHT, &levelHeight);
+					glBindTexture(GL_TEXTURE_2D, 0);
+
+					GLenum texLevelError = glGetError();
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" preBind texId=%u isTexture=%d level=%d internalformat=0x%04X size=%dx%d\n",
+						frameCount, pass->name, textureId, isValidTexture ? 1 : 0, mipLevel, levelInternalFormat, levelWidth, levelHeight);
 					if (texLevelError != GL_NO_ERROR) {
 						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" preBind texId=%u glGetTexLevelParameter error=%s(0x%04X)\n",
 							frameCount, pass->name, textureId, PipelineDebugGetGlErrorString(texLevelError), texLevelError);
-						while ((texLevelError = glGetError()) != GL_NO_ERROR) {
-							PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" additional GL error=%s(0x%04X)\n",
-								frameCount, pass->name, PipelineDebugGetGlErrorString(texLevelError), texLevelError);
+						int extraErrorCount = PipelineDebugDrainGlErrors("compute pass glGetTexLevel follow-up");
+						if (extraErrorCount > 0) {
+							PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" texId=%u drained %d additional GL errors after glGetTexLevelParameter failure\n",
+								frameCount, pass->name, textureId, extraErrorCount);
 						}
 					}
 				}
-#else
-				glBindTexture(GL_TEXTURE_2D, textureId);
-				glBindTexture(GL_TEXTURE_2D, 0);
 #endif
-				glExtBindImageTexture(imageUnit, textureId, 0, GL_FALSE, 0, imageAccess, internalformat);
+				// REMOVED: Unnecessary glBindTexture calls that interfere with image binding
+				// glBindTexture(GL_TEXTURE_2D, textureId);
+				// glBindTexture(GL_TEXTURE_2D, 0);
+				glExtBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, imageAccess, internalformat);
+#if ENABLE_PIPELINE_DEBUG_LOG
+				if (debugLog) {
+					GLenum bindError = glGetError();
+					if (bindError != GL_NO_ERROR) {
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, %s) error=%s(0x%04X)\n",
+							frameCount, pass->name, imageUnit, textureId,
+							(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
+							PipelineDebugGetGlErrorString(bindError), bindError);
+					}
+				}
+#endif
 				boundImageUnits[numBoundImageUnits] = imageUnit;
 				boundImageAccess[numBoundImageUnits] = imageAccess;
 				imageFormats[numBoundImageUnits] = internalformat;
@@ -816,10 +910,21 @@ static bool PipelineExecuteComputePass(
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
 					int resolvedIndex = PipelineResolveHistoryIndex(outputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d access=%s historyOffset=%d resolvedIndex=%d textureId=%u matchingInput=%d internalformat=0x%04X\n",
-						frameCount, pass->name, outputIndex, resource->id, imageUnit,
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d level=%d access=%s historyOffset=%d resolvedIndex=%d textureId=%u matchingInput=%d internalformat=0x%04X\n",
+						frameCount, pass->name, outputIndex, resource->id, imageUnit, mipLevel,
 						(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
 						binding->historyOffset, resolvedIndex, textureId, hasMatchingInput ? 1 : 0, internalformat);
+					if (debugImageBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
+						debugImageBindings[debugImageBindingCount].unit = (GLuint)imageUnit;
+						debugImageBindings[debugImageBindingCount].access = imageAccess;
+						debugImageBindings[debugImageBindingCount].textureId = textureId;
+						debugImageBindings[debugImageBindingCount].resourceId = resource->id;
+						debugImageBindings[debugImageBindingCount].historyOffset = binding->historyOffset;
+						debugImageBindings[debugImageBindingCount].resolvedIndex = resolvedIndex;
+						debugImageBindings[debugImageBindingCount].mipLevel = mipLevel;
+						debugImageBindings[debugImageBindingCount].isOutput = true;
+						++debugImageBindingCount;
+					}
 					debugOutputTextureId = textureId;
 					if (outputState && outputState->initialized) {
 						debugOutputWidth = outputState->width;
@@ -832,8 +937,9 @@ static bool PipelineExecuteComputePass(
 						(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY");
 					GLenum errorCode = glGetError();
 					if (errorCode != GL_NO_ERROR) {
-						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture error resource=\"%s\" resolvedIndex=%d textureId=%u error=%s(0x%04x)\n",
-							frameCount, pass->name, resource->id, resolvedIndex, textureId, PipelineDebugGetGlErrorString(errorCode), errorCode);
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture error resource=\"%s\" resolvedIndex=%d textureId=%u level=%d error=%s(0x%04x)\n",
+							frameCount, pass->name, resource->id, resolvedIndex, textureId, mipLevel,
+							PipelineDebugGetGlErrorString(errorCode), errorCode);
 						while ((errorCode = glGetError()) != GL_NO_ERROR) {
 							PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" additional GL error=%s(0x%04x)\n",
 								frameCount, pass->name, PipelineDebugGetGlErrorString(errorCode), errorCode);
@@ -853,6 +959,33 @@ static bool PipelineExecuteComputePass(
 			} break;
 		}
 	}
+
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog && debugImageBindingCount > 0) {
+		PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" image binding summary count=%d nextImageUnit=%d\n",
+			frameCount, pass->name, debugImageBindingCount, numBoundImageUnits);
+		for (int bindingIndex = 0; bindingIndex < debugImageBindingCount; ++bindingIndex) {
+			const PipelineDebugImageBindingEntry *entry = &debugImageBindings[bindingIndex];
+			const char *accessStr = "UNKNOWN";
+			switch (entry->access) {
+				case GL_READ_ONLY: accessStr = "READ"; break;
+				case GL_WRITE_ONLY: accessStr = "WRITE"; break;
+				case GL_READ_WRITE: accessStr = "READ_WRITE"; break;
+			}
+			const char *direction = entry->isOutput ? "OUT" : "IN";
+			PipelineDebugPrint("[Pipeline Debug]    %s unit=%u level=%d access=%s resource=\"%s\" historyOffset=%d resolvedIndex=%d textureId=%u\n",
+				direction,
+				entry->unit,
+				entry->mipLevel,
+				accessStr,
+				entry->resourceId ? entry->resourceId : "(null)",
+				entry->historyOffset,
+				entry->resolvedIndex,
+				entry->textureId
+			);
+		}
+	}
+#endif
 
 	if (hasWritableOutput == false) {
 		for (int i = 0; i < numBoundImageUnits; ++i) {
@@ -911,7 +1044,25 @@ static bool PipelineExecuteComputePass(
 #endif
 
 	glExtDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		GLenum dispatchError = glGetError();
+		if (dispatchError != GL_NO_ERROR) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glDispatchCompute error=%s(0x%04X)\n",
+				frameCount, pass->name, PipelineDebugGetGlErrorString(dispatchError), dispatchError);
+		}
+	}
+#endif
 	glExtMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT | GL_TEXTURE_UPDATE_BARRIER_BIT);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		GLenum barrierError = glGetError();
+		if (barrierError != GL_NO_ERROR) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glMemoryBarrier error=%s(0x%04X)\n",
+				frameCount, pass->name, PipelineDebugGetGlErrorString(barrierError), barrierError);
+		}
+	}
+#endif
 
 #if ENABLE_PIPELINE_DEBUG_LOG
 	if (debugLog) {
@@ -926,6 +1077,15 @@ static bool PipelineExecuteComputePass(
 
 	for (int i = 0; i < numBoundImageUnits; ++i) {
 		glExtBindImageTexture(boundImageUnits[i], 0, 0, GL_FALSE, 0, boundImageAccess[i], imageFormats[i]);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		if (debugLog) {
+			GLenum unbindError = glGetError();
+			if (unbindError != GL_NO_ERROR) {
+				PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, UNBIND) error=%s(0x%04X)\n",
+					frameCount, pass->name, boundImageUnits[i], PipelineDebugGetGlErrorString(unbindError), unbindError);
+			}
+		}
+#endif
 	}
 	for (int i = 0; i < numBoundSamplerUnits; ++i) {
 		glExtActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
@@ -933,6 +1093,17 @@ static bool PipelineExecuteComputePass(
 	}
 	glExtActiveTexture(GL_TEXTURE0);
 	glExtUseProgram(0);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		char exitLabel[128];
+		wsprintfA(exitLabel, "frame %d compute pass \"%s\" EXIT after cleanup", frameCount, pass->name);
+		int exitErrors = PipelineDebugDrainGlErrors(exitLabel);
+		if (exitErrors > 0) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" EXIT: found %d GL errors after cleanup\n",
+				frameCount, pass->name, exitErrors);
+		}
+	}
+#endif
 
 	return true;
 }
@@ -953,6 +1124,18 @@ static bool PipelineExecuteFragmentPass(
 	if (s_fragmentPipelinePassUniformAvailable) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
+#if ENABLE_PIPELINE_DEBUG_LOG
+	bool debugLog = PipelineDebugShouldLog(frameCount);
+	if (debugLog) {
+		char entryLabel[128];
+		wsprintfA(entryLabel, "frame %d fragment pass \"%s\" ENTRY after glUseProgram", frameCount, pass->name);
+		int entryErrors = PipelineDebugDrainGlErrors(entryLabel);
+		if (entryErrors > 0) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" ENTRY: found %d pre-existing GL errors\n",
+				frameCount, pass->name, entryErrors);
+		}
+	}
+#endif
 
 	GLuint framebuffer = 0;
 	glExtGenFramebuffers(1, &framebuffer);
@@ -963,7 +1146,6 @@ static bool PipelineExecuteFragmentPass(
 	GLuint targetWidth = SCREEN_WIDTH;
 	GLuint targetHeight = SCREEN_HEIGHT;
 #if ENABLE_PIPELINE_DEBUG_LOG
-	bool debugLog = PipelineDebugShouldLog(frameCount);
 	GLuint debugFragmentInputTextureId = 0;
 	GLuint debugFragmentOutputTextureId = 0;
 	int debugFragmentInputWidth = 0;
@@ -1180,6 +1362,15 @@ static bool PipelineExecutePresentPass(
 	if (pass->numInputs <= 0) return false;
 #if ENABLE_PIPELINE_DEBUG_LOG
 	bool debugLog = PipelineDebugShouldLog(frameCount);
+	if (debugLog) {
+		char entryLabel[128];
+		wsprintfA(entryLabel, "frame %d present pass \"%s\" ENTRY", frameCount, pass->name);
+		int entryErrors = PipelineDebugDrainGlErrors(entryLabel);
+		if (entryErrors > 0) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d present pass \"%s\" ENTRY: found %d pre-existing GL errors\n",
+				frameCount, pass->name, entryErrors);
+		}
+	}
 #else
 	bool debugLog = false;
 #endif
