@@ -223,6 +223,8 @@ static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESO
 static int s_activePipelinePassIndex = -1;
 static bool s_fragmentPipelinePassUniformAvailable = false;
 static bool s_computePipelinePassUniformAvailable = false;
+static bool s_computeFrameCountUniformAvailable = false;
+static bool s_computeWaveOutUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
 static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
 static GLuint s_graphicsComputeProgramId = 0;
@@ -232,6 +234,13 @@ static const char *s_graphicsComputeShaderSource = NULL;
 #if ENABLE_PIPELINE_DEBUG_LOG
 static int s_debugLastObservedUResultUnit = -9999;
 static int s_debugLastObservedUPrevResultUnit = -9999;
+static void PipelineDebugResetObservedUniformUnits(void);
+static void PipelineDebugObserveComputeUniformUnits(const char *context, int frameCount, const char *passName);
+static void PipelineDebugTrackComputeUniformWrite(int frameCount, const char *passName, const char *context, GLuint programId, GLint location, GLint value);
+#else
+static void PipelineDebugResetObservedUniformUnits(void);
+static void PipelineDebugObserveComputeUniformUnits(const char *context, int frameCount, const char *passName);
+static void PipelineDebugTrackComputeUniformWrite(int frameCount, const char *passName, const char *context, GLuint programId, GLint location, GLint value);
 #endif
 static bool PipelineIsSamplerType(GLenum type);
 static bool PipelineIsImageType(GLenum type);
@@ -2291,28 +2300,32 @@ static bool PipelineExecuteComputePass(
 		return false;
 	}
 
-	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	if (s_computeWaveOutUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
 #if ENABLE_PIPELINE_DEBUG_LOG
-	PipelineDebugTrackComputeUniformWrite(
-		frameCount,
-		pass->name,
-		"compute pass waveOutPos",
-		s_graphicsComputeProgramId,
-		UNIFORM_LOCATION_WAVE_OUT_POS,
-		waveOutPos
-	);
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"compute pass waveOutPos",
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_WAVE_OUT_POS,
+			waveOutPos
+		);
 #endif
-	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	}
+	if (s_computeFrameCountUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
 #if ENABLE_PIPELINE_DEBUG_LOG
-	PipelineDebugTrackComputeUniformWrite(
-		frameCount,
-		pass->name,
-		"compute pass frameCount",
-		s_graphicsComputeProgramId,
-		UNIFORM_LOCATION_FRAME_COUNT,
-		frameCount
-	);
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"compute pass frameCount",
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_FRAME_COUNT,
+			frameCount
+		);
 #endif
+	}
 	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
 	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
 	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
@@ -3262,8 +3275,20 @@ entrypoint(
 			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
 			GL_INT
 		);
+		s_computeFrameCountUniformAvailable = PipelineProgramHasUniform(
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_FRAME_COUNT,
+			GL_INT
+		);
+		s_computeWaveOutUniformAvailable = PipelineProgramHasUniform(
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_WAVE_OUT_POS,
+			GL_INT
+		);
 	} else {
 		s_computePipelinePassUniformAvailable = false;
+		s_computeFrameCountUniformAvailable = false;
+		s_computeWaveOutUniformAvailable = false;
 	}
 
 	/* フラグメントシェーダの作成 */
@@ -3380,6 +3405,9 @@ entrypoint(
 		PipelineComputeInvalidateBindingCache();
 		s_graphicsComputeUniformLocationUResult = -1;
 		s_graphicsComputeUniformLocationUPrevResult = -1;
+		s_computePipelinePassUniformAvailable = false;
+		s_computeFrameCountUniformAvailable = false;
+		s_computeWaveOutUniformAvailable = false;
 #if ENABLE_PIPELINE_DEBUG_LOG
 		PipelineDebugResetObservedUniformUnits();
 #endif
