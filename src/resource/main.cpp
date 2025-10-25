@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #include "config.h"
 
@@ -26,6 +27,15 @@
 #ifndef ARG_SCREEN_HEIGHT
 #define ARG_SCREEN_HEIGHT 720
 #endif
+
+#if ENABLE_PIPELINE_DEBUG_LOG
+static void PipelineDebugPrint(const char *format, ...);
+#endif
+static size_t PipelineStrLen(const char *str);
+static int PipelineStrncmp(const char *lhs, const char *rhs, size_t count);
+static void *PipelineMemcpy(void *dst, const void *src, size_t size);
+static const char *PipelineFindSubstring(const char *haystack, const char *needle);
+static const char *PipelineFindChar(const char *str, char ch);
 
 #ifndef GL_MAX_FRAGMENT_TEXTURE_IMAGE_UNITS
 #define GL_MAX_FRAGMENT_TEXTURE_IMAGE_UNITS GL_MAX_TEXTURE_IMAGE_UNITS
@@ -216,6 +226,7 @@ static bool s_computePipelinePassUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
 static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
 static GLuint s_graphicsComputeProgramId = 0;
+static const char *s_graphicsComputeShaderSource = NULL;
 static bool PipelineIsSamplerType(GLenum type);
 static bool PipelineIsImageType(GLenum type);
 
@@ -236,6 +247,148 @@ static int s_computeSamplerBindingCount = 0;
 static GLint s_computeImageBindingUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
 static int s_computeImageBindingCount = 0;
 static bool s_computeBindingUnitsCached = false;
+typedef struct {
+	char name[PIPELINE_MAX_RESOURCE_ID_LENGTH];
+	int binding;
+	bool isImage;
+	bool isSampler;
+} PipelineDeclaredBinding;
+static PipelineDeclaredBinding s_computeDeclaredBindings[PIPELINE_MAX_BINDINGS_PER_PASS] = {{0}};
+static int s_computeDeclaredBindingCount = 0;
+static bool s_computeDeclaredBindingParsed = false;
+
+static void PipelineComputeParseDeclaredBindings(void){
+	if (s_computeDeclaredBindingParsed) {
+		return;
+	}
+	s_computeDeclaredBindingParsed = true;
+	s_computeDeclaredBindingCount = 0;
+	const char *src = s_graphicsComputeShaderSource;
+	if (src == NULL) {
+		return;
+	}
+	while (*src != '\0') {
+		const char *layoutPos = PipelineFindSubstring(src, "layout(");
+		if (layoutPos == NULL) {
+			break;
+		}
+		src = layoutPos + 6; /* skip "layout" */
+		const char *parenOpen = PipelineFindChar(layoutPos, '(');
+		if (parenOpen == NULL) {
+			break;
+		}
+		const char *parenClose = PipelineFindChar(parenOpen, ')');
+		if (parenClose == NULL) {
+			break;
+		}
+		const char *bindingPos = PipelineFindSubstring(parenOpen, "binding");
+		if (bindingPos == NULL || bindingPos > parenClose) {
+			src = parenClose + 1;
+			continue;
+		}
+		const char *equalsPos = PipelineFindChar(bindingPos, '=');
+		if (equalsPos == NULL || equalsPos > parenClose) {
+			src = parenClose + 1;
+			continue;
+		}
+		const char *numberPos = equalsPos + 1;
+		while (*numberPos == ' ' || *numberPos == '\t') {
+			++numberPos;
+		}
+		int bindingValue = 0;
+		bool hasDigits = false;
+		while (*numberPos >= '0' && *numberPos <= '9') {
+			hasDigits = true;
+			bindingValue = bindingValue * 10 + (*numberPos - '0');
+			++numberPos;
+		}
+		if (!hasDigits) {
+			src = parenClose + 1;
+			continue;
+		}
+		const char *afterLayout = parenClose + 1;
+		while (*afterLayout == ' ' || *afterLayout == '\t' || *afterLayout == '\n' || *afterLayout == '\r') {
+			++afterLayout;
+		}
+		if (PipelineStrncmp(afterLayout, "uniform", 7) != 0) {
+			src = afterLayout;
+			continue;
+		}
+		const char *typePos = afterLayout + 7;
+		while (*typePos == ' ' || *typePos == '\t') {
+			++typePos;
+		}
+		char typeToken[32] = {0};
+		size_t typeLen = 0;
+		while (*typePos != '\0' && typeLen < sizeof(typeToken) - 1) {
+			char c = *typePos;
+			if (!( (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' )) {
+				break;
+			}
+			typeToken[typeLen++] = c;
+			++typePos;
+		}
+		typeToken[typeLen] = '\0';
+		while (*typePos == ' ' || *typePos == '\t') {
+			++typePos;
+		}
+		char nameToken[PIPELINE_MAX_RESOURCE_ID_LENGTH] = {0};
+		size_t nameLen = 0;
+		while (*typePos != '\0' && nameLen < sizeof(nameToken) - 1) {
+			char c = *typePos;
+			if (!( (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' )) {
+				break;
+			}
+			nameToken[nameLen++] = c;
+			++typePos;
+		}
+		nameToken[nameLen] = '\0';
+		bool isImage = false;
+		bool isSampler = false;
+		if (typeLen > 0) {
+			if (PipelineFindSubstring(typeToken, "image") != NULL) {
+				isImage = true;
+			} else if (PipelineFindSubstring(typeToken, "sampler") != NULL) {
+				isSampler = true;
+			}
+		}
+		if ((isImage || isSampler) && nameLen > 0) {
+			if (s_computeDeclaredBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
+				PipelineDeclaredBinding *entry = &s_computeDeclaredBindings[s_computeDeclaredBindingCount++];
+				size_t copyLen = (nameLen >= sizeof(entry->name)) ? (sizeof(entry->name) - 1) : nameLen;
+				PipelineMemcpy(entry->name, nameToken, copyLen);
+				entry->name[copyLen] = '\0';
+				entry->binding = bindingValue;
+				entry->isImage = isImage;
+				entry->isSampler = isSampler;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				PipelineDebugPrint("[Pipeline Debug] declared binding name=\"%s\" binding=%d isImage=%d isSampler=%d\n",
+					entry->name,
+					entry->binding,
+					entry->isImage ? 1 : 0,
+					entry->isSampler ? 1 : 0
+				);
+#endif
+			}
+		}
+		src = typePos;
+	}
+}
+
+static int PipelineComputeLookupDeclaredBinding(const char *name, bool isImage){
+	if (name == NULL || *name == '\0') {
+		return -1;
+	}
+	for (int i = 0; i < s_computeDeclaredBindingCount; ++i) {
+		const PipelineDeclaredBinding *entry = &s_computeDeclaredBindings[i];
+		if ((isImage && entry->isImage) || (!isImage && entry->isSampler)) {
+			if (PipelineStrncmp(entry->name, name, PIPELINE_MAX_RESOURCE_ID_LENGTH - 1) == 0) {
+				return entry->binding;
+			}
+		}
+	}
+	return -1;
+}
 
 static void PipelineComputeInvalidateBindingCache(void){
 	s_computeBindingUnitsCached = false;
@@ -273,6 +426,7 @@ static void PipelineComputeEnsureBindingCache(void){
 	if (s_computeBindingUnitsCached) {
 		return;
 	}
+	PipelineComputeParseDeclaredBindings();
 	s_computeSamplerBindingCount = 0;
 	s_computeImageBindingCount = 0;
 	if (s_graphicsComputeProgramId == 0) {
@@ -314,7 +468,38 @@ static void PipelineComputeEnsureBindingCache(void){
 		GLint location = values[1];
 		GLint arraySize = values[2];
 		bool referencedByCompute = (values[3] != 0);
+		char uniformName[PIPELINE_MAX_RESOURCE_ID_LENGTH] = {0};
+		if (glExtGetProgramResourceName != NULL) {
+			GLsizei uniformNameLength = 0;
+			GLsizei maxLength = (GLsizei)(sizeof(uniformName) - 1);
+			glExtGetProgramResourceName(
+				s_graphicsComputeProgramId,
+				GL_UNIFORM,
+				(GLuint)uniformIndex,
+				maxLength,
+				&uniformNameLength,
+				uniformName
+			);
+			uniformName[(uniformNameLength < maxLength) ? uniformNameLength : maxLength] = '\0';
+		}
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugPrint("[Pipeline Debug] binding cache uniform index=%d name=\"%s\" type=0x%04X location=%d arraySize=%d referencedByCS=%d\n",
+			uniformIndex,
+			(*uniformName != '\0') ? uniformName : "(unknown)",
+			type,
+			location,
+			arraySize,
+			referencedByCompute ? 1 : 0
+		);
+#endif
 		if (!referencedByCompute || location < 0) {
+#if ENABLE_PIPELINE_DEBUG_LOG
+			if (!referencedByCompute) {
+				PipelineDebugPrint("[Pipeline Debug] binding cache uniform index=%d skipped (not referenced by compute)\n", uniformIndex);
+			} else {
+				PipelineDebugPrint("[Pipeline Debug] binding cache uniform index=%d skipped (location < 0)\n", uniformIndex);
+			}
+#endif
 			continue;
 		}
 		if (arraySize <= 0) {
@@ -322,15 +507,48 @@ static void PipelineComputeEnsureBindingCache(void){
 		}
 		for (int element = 0; element < arraySize; ++element) {
 			GLint elementLocation = location + element;
-			GLint unitValue = -1;
-			getUniformiv(s_graphicsComputeProgramId, elementLocation, &unitValue);
+			GLint uniformUnitValue = -1;
+			getUniformiv(s_graphicsComputeProgramId, elementLocation, &uniformUnitValue);
+			GLint chosenUnitValue = uniformUnitValue;
+			const char *uniformNamePtr = (*uniformName != '\0') ? uniformName : NULL;
+#if ENABLE_PIPELINE_DEBUG_LOG
+			PipelineDebugPrint("[Pipeline Debug] binding cache uniform index=%d element=%d type=0x%04X elementLocation=%d uniformUnitValue=%d\n",
+				uniformIndex,
+				element,
+				type,
+				elementLocation,
+				uniformUnitValue
+			);
+#endif
 			if (PipelineIsSamplerType(type)) {
+				int declaredBinding = PipelineComputeLookupDeclaredBinding(uniformNamePtr, false);
+				if (declaredBinding >= 0) {
+					chosenUnitValue = declaredBinding;
+				}
+#if ENABLE_PIPELINE_DEBUG_LOG
+				PipelineDebugPrint("[Pipeline Debug] binding cache sampler \"%s\" declaredBinding=%d chosenUnit=%d\n",
+					(uniformNamePtr != NULL) ? uniformNamePtr : "(unknown)",
+					declaredBinding,
+					chosenUnitValue
+				);
+#endif
 				if (s_computeSamplerBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
-					s_computeSamplerBindingUnits[s_computeSamplerBindingCount++] = unitValue;
+					s_computeSamplerBindingUnits[s_computeSamplerBindingCount++] = chosenUnitValue;
 				}
 			} else if (PipelineIsImageType(type)) {
+				int declaredBinding = PipelineComputeLookupDeclaredBinding(uniformNamePtr, true);
+				if (declaredBinding >= 0) {
+					chosenUnitValue = declaredBinding;
+				}
+#if ENABLE_PIPELINE_DEBUG_LOG
+				PipelineDebugPrint("[Pipeline Debug] binding cache image \"%s\" declaredBinding=%d chosenUnit=%d\n",
+					(uniformNamePtr != NULL) ? uniformNamePtr : "(unknown)",
+					declaredBinding,
+					chosenUnitValue
+				);
+#endif
 				if (s_computeImageBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
-					s_computeImageBindingUnits[s_computeImageBindingCount++] = unitValue;
+					s_computeImageBindingUnits[s_computeImageBindingCount++] = chosenUnitValue;
 				}
 			}
 		}
@@ -525,6 +743,43 @@ static void *PipelineMemset(void *dst, int value, size_t size){
 		d[i] = v;
 	}
 	return dst;
+}
+
+static const char *PipelineFindChar(const char *str, char ch){
+	if (str == NULL) return NULL;
+	while (*str != '\0') {
+		if (*str == ch) {
+			return str;
+		}
+		++str;
+	}
+	return NULL;
+}
+
+static const char *PipelineFindSubstring(const char *haystack, const char *needle){
+	if (haystack == NULL || needle == NULL) return NULL;
+	if (*needle == '\0') {
+		return haystack;
+	}
+	size_t needleLen = PipelineStrLen(needle);
+	if (needleLen == 0) {
+		return haystack;
+	}
+	const char first = needle[0];
+	const char *pos = haystack;
+	while (*pos != '\0') {
+		if (*pos == first) {
+			size_t matchCount = 1;
+			while (matchCount < needleLen && pos[matchCount] != '\0' && pos[matchCount] == needle[matchCount]) {
+				++matchCount;
+			}
+			if (matchCount == needleLen) {
+				return pos;
+			}
+		}
+		++pos;
+	}
+	return NULL;
 }
 
 extern "C" void *__cdecl memset(void *dst, int value, size_t size){
@@ -1454,6 +1709,32 @@ static bool PipelineExecuteComputePass(
 
 	glExtUseProgram(s_graphicsComputeProgramId);
 	PipelineComputeEnsureBindingCache();
+#if ENABLE_PIPELINE_DEBUG_LOG
+	if (debugLog) {
+		PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" binding cache samplerCount=%d imageCount=%d\n",
+			frameCount,
+			pass->name,
+			s_computeSamplerBindingCount,
+			s_computeImageBindingCount
+		);
+		for (int samplerIndex = 0; samplerIndex < s_computeSamplerBindingCount; ++samplerIndex) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" binding cache sampler[%d]=%d\n",
+				frameCount,
+				pass->name,
+				samplerIndex,
+				s_computeSamplerBindingUnits[samplerIndex]
+			);
+		}
+		for (int imageIndex = 0; imageIndex < s_computeImageBindingCount; ++imageIndex) {
+			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" binding cache image[%d]=%d\n",
+				frameCount,
+				pass->name,
+				imageIndex,
+				s_computeImageBindingUnits[imageIndex]
+			);
+		}
+	}
+#endif
 	if (s_computePipelinePassUniformAvailable) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
@@ -1500,9 +1781,10 @@ static bool PipelineExecuteComputePass(
 				++samplerUnitCount;
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
+					const char *unitSource = (cachedUnit >= 0) ? "cached" : "fallback";
 					int resolvedIndex = PipelineResolveHistoryIndex(inputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" sampler unit %u historyOffset=%d resolvedIndex=%d textureId=%u\n",
-						frameCount, pass->name, inputIndex, resource->id, samplerUnit, binding->historyOffset, resolvedIndex, textureId);
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" sampler unit %u (%s=%d) historyOffset=%d resolvedIndex=%d textureId=%u\n",
+						frameCount, pass->name, inputIndex, resource->id, samplerUnit, unitSource, cachedUnit, binding->historyOffset, resolvedIndex, textureId);
 					if (binding->access == PipelineResourceAccessHistoryRead) {
 						debugPrevTextureId = textureId;
 						if (inputState && inputState->initialized) {
@@ -1549,10 +1831,11 @@ static bool PipelineExecuteComputePass(
 				++numBoundImageUnits;
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
+					const char *unitSource = (cachedUnit >= 0) ? "cached" : "fallback";
 					int resolvedIndex = PipelineResolveHistoryIndex(inputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u READ level=%d historyOffset=%d resolvedIndex=%d textureId=%u internalformat=0x%04X\n",
-						frameCount, pass->name, inputIndex, resource->id, imageUnit, mipLevel,
-						binding->historyOffset, resolvedIndex, textureId, format);
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" input %d \"%s\" image unit %u (%s=%d) READ level=%d historyOffset=%d resolvedIndex=%d textureId=%u internalformat=0x%04X\n",
+						frameCount, pass->name, inputIndex, resource->id, imageUnit, unitSource, cachedUnit,
+						mipLevel, binding->historyOffset, resolvedIndex, textureId, format);
 					if (debugImageBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
 						debugImageBindings[debugImageBindingCount].unit = (GLuint)imageUnit;
 						debugImageBindings[debugImageBindingCount].access = GL_READ_ONLY;
@@ -1686,9 +1969,10 @@ static bool PipelineExecuteComputePass(
 				hasWritableOutput = true;
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
+					const char *unitSource = (cachedUnit >= 0) ? "cached" : "fallback";
 					int resolvedIndex = PipelineResolveHistoryIndex(outputState, frameCount, binding->historyOffset);
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d level=%d access=%s historyOffset=%d resolvedIndex=%d textureId=%u matchingInput=%d internalformat=0x%04X\n",
-						frameCount, pass->name, outputIndex, resource->id, imageUnit, mipLevel,
+					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" output %d \"%s\" image unit %d (%s=%d) level=%d access=%s historyOffset=%d resolvedIndex=%d textureId=%u matchingInput=%d internalformat=0x%04X\n",
+						frameCount, pass->name, outputIndex, resource->id, imageUnit, unitSource, cachedUnit, mipLevel,
 						(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
 						binding->historyOffset, resolvedIndex, textureId, hasMatchingInput ? 1 : 0, internalformat);
 					if (debugImageBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
@@ -2488,6 +2772,7 @@ entrypoint(
 	/* グラフィクス用コンピュートシェーダのポインタ配列 */
 	const char *graphicsComputeShaderCode = p;
 	const char *graphicsComputeShaderCodes[] = {graphicsComputeShaderCode};
+	s_graphicsComputeShaderSource = graphicsComputeShaderCode;
 
 	/* サウンド用コンピュートシェーダコードの開始位置を検索 */
 	while (*p != '\0') { p++; }

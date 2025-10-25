@@ -48,6 +48,7 @@ char g_concatenatedString_align0[] =
 	"glGetUniformLocation\0"		/* Program が既出ワード */
 	"glGetProgramInterfaceiv\0"		/* Program が既出ワード */
 	"glGetProgramResourceiv\0"		/* Program が既出ワード */
+	"glGetProgramResourceName\0"	/* Program が既出ワード */
 	"glGetProgramiv\0"				/* Program が既出ワード */
 	"glDeleteProgram\0"				/* Program が既出ワード */
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
@@ -105,6 +106,7 @@ typedef enum {
 	GlExtGetUniformLocation,
 	GlExtGetProgramInterfaceiv,
 	GlExtGetProgramResourceiv,
+	GlExtGetProgramResourceName,
 	GlExtGetProgramiv,
 	GlExtDeleteProgram,
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
@@ -150,6 +152,7 @@ typedef enum {
 #define glExtGetUniformLocation		((PFNGLGETUNIFORMLOCATIONPROC)  s_glExtFunctions[GlExtGetUniformLocation])
 #define glExtGetProgramInterfaceiv	((PFNGLGETPROGRAMINTERFACEIVPROC)s_glExtFunctions[GlExtGetProgramInterfaceiv])
 #define glExtGetProgramResourceiv	((PFNGLGETPROGRAMRESOURCEIVPROC)s_glExtFunctions[GlExtGetProgramResourceiv])
+#define glExtGetProgramResourceName	((PFNGLGETPROGRAMRESOURCENAMEPROC)s_glExtFunctions[GlExtGetProgramResourceName])
 #define glExtGetProgramiv			((PFNGLGETPROGRAMIVPROC)        s_glExtFunctions[GlExtGetProgramiv])
 #define glExtDeleteProgram			((PFNGLDELETEPROGRAMPROC)       s_glExtFunctions[GlExtDeleteProgram])
 #if ENABLE_BACK_BUFFER && ((NUM_RENDER_TARGETS > 1) || (PIXEL_FORMAT != PIXEL_FORMAT_UNORM8_RGBA))
