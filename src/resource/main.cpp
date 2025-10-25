@@ -20,6 +20,20 @@
 #define ENABLE_PIPELINE_DEBUG_LOG 1
 #endif
 
+#ifndef ARG_SCREEN_WIDTH
+#define ARG_SCREEN_WIDTH 1280
+#endif
+#ifndef ARG_SCREEN_HEIGHT
+#define ARG_SCREEN_HEIGHT 720
+#endif
+
+#ifndef GL_MAX_FRAGMENT_TEXTURE_IMAGE_UNITS
+#define GL_MAX_FRAGMENT_TEXTURE_IMAGE_UNITS GL_MAX_TEXTURE_IMAGE_UNITS
+#endif
+#ifndef GL_IMAGE_BINDING
+#define GL_IMAGE_BINDING 0x8F3F
+#endif
+
 
 /* fopen 等のセキュアでないレガシー API に対する警告の抑制 */
 #pragma warning(disable:4996)
@@ -200,6 +214,10 @@ static int s_activePipelinePassIndex = -1;
 static bool s_fragmentPipelinePassUniformAvailable = false;
 static bool s_computePipelinePassUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
+static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
+static GLuint s_graphicsComputeProgramId = 0;
+static bool PipelineIsSamplerType(GLenum type);
+static bool PipelineIsImageType(GLenum type);
 
 /*=============================================================================
 ▼	各種リソースの取り込み
@@ -212,13 +230,241 @@ static bool s_loggedPipelineExecutionFailure = false;
 -----------------------------------------------------------------------------*/
 static void *s_glExtFunctions[NUM_GLEXT_FUNCTIONS] = {0};
 static PFNGLGETINTEGERI_VPROC s_glGetIntegeri_v = NULL;
+static PFNGLGETUNIFORMIVPROC s_glGetUniformiv = NULL;
+static GLint s_computeSamplerBindingUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+static int s_computeSamplerBindingCount = 0;
+static GLint s_computeImageBindingUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+static int s_computeImageBindingCount = 0;
+static bool s_computeBindingUnitsCached = false;
 
+static void PipelineComputeInvalidateBindingCache(void){
+	s_computeBindingUnitsCached = false;
+	s_computeSamplerBindingCount = 0;
+	s_computeImageBindingCount = 0;
+}
 
-/*=============================================================================
-▼	各種構造体
------------------------------------------------------------------------------*/
-static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
-static GLuint s_graphicsComputeProgramId = 0;
+static PFNGLGETINTEGERI_VPROC PipelineResolveGetIntegeriV(void){
+	if (s_glGetIntegeri_v == NULL) {
+		s_glGetIntegeri_v = (PFNGLGETINTEGERI_VPROC)CallGl3wGetProcAddress("glGetIntegeri_v");
+		if (s_glGetIntegeri_v == NULL && s_gl3wWglGetProcAddress) {
+			s_glGetIntegeri_v = (PFNGLGETINTEGERI_VPROC)s_gl3wWglGetProcAddress("glGetIntegeri_v");
+		}
+		if (s_glGetIntegeri_v == NULL && s_gl3wLibrary != NULL) {
+			s_glGetIntegeri_v = (PFNGLGETINTEGERI_VPROC)GetProcAddress(s_gl3wLibrary, "glGetIntegeri_v");
+		}
+	}
+	return s_glGetIntegeri_v;
+}
+
+static PFNGLGETUNIFORMIVPROC PipelineResolveGetUniformiv(void){
+	if (s_glGetUniformiv == NULL) {
+		s_glGetUniformiv = (PFNGLGETUNIFORMIVPROC)CallGl3wGetProcAddress("glGetUniformiv");
+		if (s_glGetUniformiv == NULL && s_gl3wWglGetProcAddress) {
+			s_glGetUniformiv = (PFNGLGETUNIFORMIVPROC)s_gl3wWglGetProcAddress("glGetUniformiv");
+		}
+		if (s_glGetUniformiv == NULL && s_gl3wLibrary != NULL) {
+			s_glGetUniformiv = (PFNGLGETUNIFORMIVPROC)GetProcAddress(s_gl3wLibrary, "glGetUniformiv");
+		}
+	}
+	return s_glGetUniformiv;
+}
+
+static void PipelineComputeEnsureBindingCache(void){
+	if (s_computeBindingUnitsCached) {
+		return;
+	}
+	s_computeSamplerBindingCount = 0;
+	s_computeImageBindingCount = 0;
+	if (s_graphicsComputeProgramId == 0) {
+		return;
+	}
+	if (glExtGetProgramInterfaceiv == NULL || glExtGetProgramResourceiv == NULL) {
+		return;
+	}
+	PFNGLGETUNIFORMIVPROC getUniformiv = PipelineResolveGetUniformiv();
+	if (getUniformiv == NULL) {
+		return;
+	}
+	GLint numUniforms = 0;
+	glExtGetProgramInterfaceiv(
+		/* GLuint program */			s_graphicsComputeProgramId,
+		/* GLenum programInterface */	GL_UNIFORM,
+		/* GLenum pname */				GL_ACTIVE_RESOURCES,
+		/* GLint *params */				&numUniforms
+	);
+	GLenum properties[4] = {
+		GL_TYPE,
+		GL_LOCATION,
+		GL_ARRAY_SIZE,
+		GL_REFERENCED_BY_COMPUTE_SHADER
+	};
+	for (int uniformIndex = 0; uniformIndex < numUniforms; ++uniformIndex) {
+		GLint values[4] = {0, 0, 0, 0};
+		glExtGetProgramResourceiv(
+			/* GLuint program */			s_graphicsComputeProgramId,
+			/* GLenum programInterface */	GL_UNIFORM,
+			/* GLuint index */				(GLuint)uniformIndex,
+			/* GLsizei propCount */			4,
+			/* const GLenum *props */		properties,
+			/* GLsizei bufSize */			4,
+			/* GLsizei *length */			NULL,
+			/* GLint *params */				values
+		);
+		GLenum type = (GLenum)values[0];
+		GLint location = values[1];
+		GLint arraySize = values[2];
+		bool referencedByCompute = (values[3] != 0);
+		if (!referencedByCompute || location < 0) {
+			continue;
+		}
+		if (arraySize <= 0) {
+			arraySize = 1;
+		}
+		for (int element = 0; element < arraySize; ++element) {
+			GLint elementLocation = location + element;
+			GLint unitValue = -1;
+			getUniformiv(s_graphicsComputeProgramId, elementLocation, &unitValue);
+			if (PipelineIsSamplerType(type)) {
+				if (s_computeSamplerBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
+					s_computeSamplerBindingUnits[s_computeSamplerBindingCount++] = unitValue;
+				}
+			} else if (PipelineIsImageType(type)) {
+				if (s_computeImageBindingCount < PIPELINE_MAX_BINDINGS_PER_PASS) {
+					s_computeImageBindingUnits[s_computeImageBindingCount++] = unitValue;
+				}
+			}
+		}
+	}
+	s_computeBindingUnitsCached = true;
+}
+
+static PFNGLBINDIMAGETEXTUREPROC PipelineResolveBindImageTextureProc(void){
+	static PFNGLBINDIMAGETEXTUREPROC proc = NULL;
+	if (proc != NULL) {
+		return proc;
+	}
+	proc = CallGl3wGetBindImageTexture();
+	if (proc == NULL) {
+		proc = (PFNGLBINDIMAGETEXTUREPROC)CallGl3wGetProcAddress("glBindImageTexture");
+	}
+	if (proc == NULL) {
+		proc = (PFNGLBINDIMAGETEXTUREPROC)wglGetProcAddress("glBindImageTexture");
+	}
+	if (proc == NULL) {
+		HMODULE module = GetModuleHandleA("opengl32.dll");
+		if (module == NULL) {
+			module = LoadLibraryA("opengl32.dll");
+		}
+		if (module != NULL) {
+			proc = (PFNGLBINDIMAGETEXTUREPROC)GetProcAddress(module, "glBindImageTexture");
+		}
+	}
+	if (proc != NULL) {
+		s_glExtFunctions[GlExtBindImageTexture] = (void*)proc;
+	}
+	return proc;
+}
+
+static void PipelineBindImageTexture(
+	GLuint unit,
+	GLuint texture,
+	GLint level,
+	GLboolean layered,
+	GLint layer,
+	GLenum access,
+	GLenum format
+){
+	PFNGLBINDIMAGETEXTUREPROC proc = PipelineResolveBindImageTextureProc();
+	if (proc != NULL) {
+		proc(unit, texture, level, layered, layer, access, format);
+	}
+}
+
+static bool PipelineIsSamplerType(GLenum type){
+	switch (type) {
+		case GL_SAMPLER_1D:
+		case GL_SAMPLER_2D:
+		case GL_SAMPLER_3D:
+		case GL_SAMPLER_CUBE:
+		case GL_SAMPLER_1D_SHADOW:
+		case GL_SAMPLER_2D_SHADOW:
+		case GL_SAMPLER_1D_ARRAY:
+		case GL_SAMPLER_2D_ARRAY:
+		case GL_SAMPLER_1D_ARRAY_SHADOW:
+		case GL_SAMPLER_2D_ARRAY_SHADOW:
+		case GL_SAMPLER_2D_MULTISAMPLE:
+		case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+		case GL_SAMPLER_CUBE_SHADOW:
+		case GL_INT_SAMPLER_1D:
+		case GL_INT_SAMPLER_2D:
+		case GL_INT_SAMPLER_3D:
+		case GL_INT_SAMPLER_CUBE:
+		case GL_INT_SAMPLER_1D_ARRAY:
+		case GL_INT_SAMPLER_2D_ARRAY:
+		case GL_UNSIGNED_INT_SAMPLER_1D:
+		case GL_UNSIGNED_INT_SAMPLER_2D:
+		case GL_UNSIGNED_INT_SAMPLER_3D:
+		case GL_UNSIGNED_INT_SAMPLER_CUBE:
+		case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+		case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+		case GL_SAMPLER_2D_RECT:
+		case GL_SAMPLER_2D_RECT_SHADOW:
+		case GL_INT_SAMPLER_2D_RECT:
+		case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+		case GL_SAMPLER_BUFFER:
+		case GL_INT_SAMPLER_BUFFER:
+		case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+		case GL_SAMPLER_CUBE_MAP_ARRAY:
+		case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+		case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+		case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool PipelineIsImageType(GLenum type){
+	switch (type) {
+		case GL_IMAGE_1D:
+		case GL_IMAGE_2D:
+		case GL_IMAGE_3D:
+		case GL_IMAGE_2D_RECT:
+		case GL_IMAGE_CUBE:
+		case GL_IMAGE_BUFFER:
+		case GL_IMAGE_1D_ARRAY:
+		case GL_IMAGE_2D_ARRAY:
+		case GL_IMAGE_CUBE_MAP_ARRAY:
+		case GL_IMAGE_2D_MULTISAMPLE:
+		case GL_IMAGE_2D_MULTISAMPLE_ARRAY:
+		case GL_INT_IMAGE_1D:
+		case GL_INT_IMAGE_2D:
+		case GL_INT_IMAGE_3D:
+		case GL_INT_IMAGE_2D_RECT:
+		case GL_INT_IMAGE_CUBE:
+		case GL_INT_IMAGE_BUFFER:
+		case GL_INT_IMAGE_1D_ARRAY:
+		case GL_INT_IMAGE_2D_ARRAY:
+		case GL_INT_IMAGE_CUBE_MAP_ARRAY:
+		case GL_INT_IMAGE_2D_MULTISAMPLE:
+		case GL_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+		case GL_UNSIGNED_INT_IMAGE_1D:
+		case GL_UNSIGNED_INT_IMAGE_2D:
+		case GL_UNSIGNED_INT_IMAGE_3D:
+		case GL_UNSIGNED_INT_IMAGE_2D_RECT:
+		case GL_UNSIGNED_INT_IMAGE_CUBE:
+		case GL_UNSIGNED_INT_IMAGE_BUFFER:
+		case GL_UNSIGNED_INT_IMAGE_1D_ARRAY:
+		case GL_UNSIGNED_INT_IMAGE_2D_ARRAY:
+		case GL_UNSIGNED_INT_IMAGE_CUBE_MAP_ARRAY:
+		case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE:
+		case GL_UNSIGNED_INT_IMAGE_2D_MULTISAMPLE_ARRAY:
+			return true;
+		default:
+			return false;
+	}
+}
+
 
 /*=============================================================================
 ▼	ローカル関数（CRT 非依存）
@@ -370,6 +616,386 @@ static int PipelineDebugDrainGlErrors(const char *label){
 	return drainedCount;
 }
 #if ENABLE_PIPELINE_DEBUG_LOG
+static void *PipelineDebugAllocZero(size_t size){
+	if (size == 0) {
+		return NULL;
+	}
+	return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+}
+
+static void PipelineDebugFree(void *ptr){
+	if (ptr) {
+		HeapFree(GetProcessHeap(), 0, ptr);
+	}
+}
+
+typedef struct {
+	GLboolean *samplerUsed;
+	int samplerCapacity;
+	int samplerCount;
+	GLboolean *imageUsed;
+	int imageCapacity;
+	int imageCount;
+	bool samplerOverflowLogged;
+	bool imageOverflowLogged;
+} PipelineDebugStageUsage;
+
+static void PipelineDebugStageUsageInit(
+	PipelineDebugStageUsage *usage,
+	int samplerCapacity,
+	int imageCapacity
+){
+	if (usage == NULL) return;
+	usage->samplerCapacity = (samplerCapacity > 0) ? samplerCapacity : 0;
+	usage->samplerCount = 0;
+	usage->samplerOverflowLogged = false;
+	usage->samplerUsed = NULL;
+	if (usage->samplerCapacity > 0) {
+		usage->samplerUsed = (GLboolean*)PipelineDebugAllocZero((size_t)usage->samplerCapacity * sizeof(GLboolean));
+	}
+	usage->imageCapacity = (imageCapacity > 0) ? imageCapacity : 0;
+	usage->imageCount = 0;
+	usage->imageOverflowLogged = false;
+	usage->imageUsed = NULL;
+	if (usage->imageCapacity > 0) {
+		usage->imageUsed = (GLboolean*)PipelineDebugAllocZero((size_t)usage->imageCapacity * sizeof(GLboolean));
+	}
+}
+
+static void PipelineDebugStageUsageDispose(PipelineDebugStageUsage *usage){
+	if (usage == NULL) return;
+	if (usage->samplerUsed) {
+		PipelineDebugFree(usage->samplerUsed);
+		usage->samplerUsed = NULL;
+	}
+	if (usage->imageUsed) {
+		PipelineDebugFree(usage->imageUsed);
+		usage->imageUsed = NULL;
+	}
+	usage->samplerCapacity = 0;
+	usage->samplerCount = 0;
+	usage->imageCapacity = 0;
+	usage->imageCount = 0;
+	usage->samplerOverflowLogged = false;
+	usage->imageOverflowLogged = false;
+}
+
+static void PipelineDebugStageUsageMarkUnit(
+	PipelineDebugStageUsage *usage,
+	bool isSampler,
+	int unit,
+	const char *stageLabel
+){
+	if (usage == NULL) return;
+	if (unit < 0) {
+		return;
+	}
+	if (isSampler) {
+		if (usage->samplerCapacity <= 0 || usage->samplerUsed == NULL) {
+			if (usage->samplerOverflowLogged == false) {
+				PipelineDebugPrint("[Pipeline Debug] %s sampler unit %d reported but sampler capacity is zero\n",
+					stageLabel, unit);
+				usage->samplerOverflowLogged = true;
+			}
+			return;
+		}
+		if (unit >= usage->samplerCapacity) {
+			if (usage->samplerOverflowLogged == false) {
+				PipelineDebugPrint("[Pipeline Debug] %s sampler unit %d exceeds limit %d\n",
+					stageLabel, unit, usage->samplerCapacity);
+				usage->samplerOverflowLogged = true;
+			}
+			return;
+		}
+		if (usage->samplerUsed[unit] == GL_FALSE) {
+			usage->samplerUsed[unit] = GL_TRUE;
+			++usage->samplerCount;
+		}
+	} else {
+		if (usage->imageCapacity <= 0 || usage->imageUsed == NULL) {
+			if (usage->imageOverflowLogged == false) {
+				PipelineDebugPrint("[Pipeline Debug] %s image unit %d reported but image capacity is zero\n",
+					stageLabel, unit);
+				usage->imageOverflowLogged = true;
+			}
+			return;
+		}
+		if (unit >= usage->imageCapacity) {
+			if (usage->imageOverflowLogged == false) {
+				PipelineDebugPrint("[Pipeline Debug] %s image unit %d exceeds limit %d\n",
+					stageLabel, unit, usage->imageCapacity);
+				usage->imageOverflowLogged = true;
+			}
+			return;
+		}
+		if (usage->imageUsed[unit] == GL_FALSE) {
+			usage->imageUsed[unit] = GL_TRUE;
+			++usage->imageCount;
+		}
+	}
+}
+
+static void PipelineDebugPrintUnitFlags(
+	const char *label,
+	const GLboolean *flags,
+	int capacity
+){
+	if (label == NULL || flags == NULL || capacity <= 0) {
+		return;
+	}
+	int count = 0;
+	for (int i = 0; i < capacity; ++i) {
+		if (flags[i] != GL_FALSE) {
+			++count;
+		}
+	}
+	PipelineDebugPrint("[Pipeline Debug]    %s count=%d\n", label, count);
+	if (count <= 0) {
+		return;
+	}
+	char line[512];
+	int offset = wsprintfA(line, "%s units:", label);
+	if (offset < 0) {
+		return;
+	}
+	for (int i = 0; i < capacity; ++i) {
+		if (flags[i] != GL_FALSE) {
+			if (offset > (int)(sizeof(line) - 16)) {
+				break;
+			}
+			offset += wsprintfA(line + offset, " %d", i);
+		}
+	}
+	PipelineDebugPrint("[Pipeline Debug]    %s\n", line);
+}
+
+static void PipelineDebugCheckLimit(const char *label, int used, int limit){
+	if (label == NULL) return;
+	if (limit <= 0) return;
+	if (used > limit) {
+		PipelineDebugPrint("[Pipeline Debug]    EXCEEDED %s used=%d limit=%d\n",
+			label, used, limit);
+	}
+}
+
+static void PipelineDebugReportProgramUnitUsage(
+	GLuint programId,
+	const char *passName,
+	int frameCount
+){
+	if (programId == 0) return;
+	GLint prevProgram = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+	if ((GLuint)prevProgram != programId) {
+		glExtUseProgram(programId);
+	}
+
+	GLint maxCombinedTex = 0;
+	GLint maxImageUnits = 0;
+	GLint maxTexVS = 0, maxTexFS = 0, maxTexCS = 0;
+	GLint maxImgVS = 0, maxImgFS = 0, maxImgCS = 0;
+	glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxCombinedTex);
+	glGetIntegerv(GL_MAX_IMAGE_UNITS, &maxImageUnits);
+	glGetIntegerv(GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS, &maxTexVS);
+	glGetIntegerv(GL_MAX_FRAGMENT_TEXTURE_IMAGE_UNITS, &maxTexFS);
+	glGetIntegerv(GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS, &maxTexCS);
+	glGetIntegerv(GL_MAX_VERTEX_IMAGE_UNIFORMS, &maxImgVS);
+	glGetIntegerv(GL_MAX_FRAGMENT_IMAGE_UNIFORMS, &maxImgFS);
+	glGetIntegerv(GL_MAX_COMPUTE_IMAGE_UNIFORMS, &maxImgCS);
+
+	PipelineDebugStageUsage vsUsage;
+	PipelineDebugStageUsage fsUsage;
+	PipelineDebugStageUsage csUsage;
+	PipelineDebugStageUsageInit(&vsUsage, maxTexVS, maxImgVS);
+	PipelineDebugStageUsageInit(&fsUsage, maxTexFS, maxImgFS);
+	PipelineDebugStageUsageInit(&csUsage, maxTexCS, maxImgCS);
+
+	GLboolean *combinedSamplerUsed = NULL;
+	int combinedSamplerCapacity = (maxCombinedTex > 0) ? maxCombinedTex : 0;
+	int combinedSamplerCount = 0;
+	bool combinedOverflowLogged = false;
+	if (combinedSamplerCapacity > 0) {
+		combinedSamplerUsed = (GLboolean*)PipelineDebugAllocZero((size_t)combinedSamplerCapacity * sizeof(GLboolean));
+	}
+
+	GLint numUniforms = 0;
+	glExtGetProgramInterfaceiv(
+		/* GLuint program */			programId,
+		/* GLenum programInterface */	GL_UNIFORM,
+		/* GLenum pname */				GL_ACTIVE_RESOURCES,
+		/* GLint *params */				&numUniforms
+	);
+	GLenum properties[6] = {
+		GL_TYPE,
+		GL_LOCATION,
+		GL_ARRAY_SIZE,
+		GL_REFERENCED_BY_VERTEX_SHADER,
+		GL_REFERENCED_BY_FRAGMENT_SHADER,
+		GL_REFERENCED_BY_COMPUTE_SHADER
+	};
+	GLint values[6] = {0, 0, 0, 0, 0, 0};
+	for (int uniformIndex = 0; uniformIndex < numUniforms; ++uniformIndex) {
+		glExtGetProgramResourceiv(
+			/* GLuint program */			programId,
+			/* GLenum programInterface */	GL_UNIFORM,
+			/* GLuint index */				(GLuint)uniformIndex,
+			/* GLsizei propCount */			6,
+			/* const GLenum *props */		properties,
+			/* GLsizei bufSize */			6,
+			/* GLsizei *length */			NULL,
+			/* GLint *params */				values
+		);
+		GLenum type = (GLenum)values[0];
+		GLint location = values[1];
+		GLint arraySize = values[2];
+		bool refVS = (values[3] != 0);
+		bool refFS = (values[4] != 0);
+		bool refCS = (values[5] != 0);
+		if (location < 0) {
+			continue;
+		}
+		if (arraySize <= 0) {
+			arraySize = 1;
+		}
+		bool isSampler = PipelineIsSamplerType(type);
+		bool isImage = PipelineIsImageType(type);
+		if (!isSampler && !isImage) {
+			continue;
+		}
+		for (int element = 0; element < arraySize; ++element) {
+			GLint elementLocation = location + element;
+			GLint unit = -1;
+			PFNGLGETUNIFORMIVPROC getUniformiv = PipelineResolveGetUniformiv();
+			if (getUniformiv != NULL) {
+				getUniformiv(programId, elementLocation, &unit);
+			}
+			if (unit < 0) {
+				continue;
+			}
+			if (isSampler) {
+				if (combinedSamplerUsed != NULL) {
+					if (unit < combinedSamplerCapacity) {
+						if (combinedSamplerUsed[unit] == GL_FALSE) {
+							combinedSamplerUsed[unit] = GL_TRUE;
+							++combinedSamplerCount;
+						}
+					} else if (combinedOverflowLogged == false) {
+						PipelineDebugPrint("[Pipeline Debug] combined sampler unit %d exceeds GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS=%d\n",
+							unit, maxCombinedTex);
+						combinedOverflowLogged = true;
+					}
+				}
+				if (refVS) {
+					PipelineDebugStageUsageMarkUnit(&vsUsage, true, unit, "VS");
+				}
+				if (refFS) {
+					PipelineDebugStageUsageMarkUnit(&fsUsage, true, unit, "FS");
+				}
+				if (refCS) {
+					PipelineDebugStageUsageMarkUnit(&csUsage, true, unit, "CS");
+				}
+			} else if (isImage) {
+				if (refVS) {
+					PipelineDebugStageUsageMarkUnit(&vsUsage, false, unit, "VS");
+				}
+				if (refFS) {
+					PipelineDebugStageUsageMarkUnit(&fsUsage, false, unit, "FS");
+				}
+				if (refCS) {
+					PipelineDebugStageUsageMarkUnit(&csUsage, false, unit, "CS");
+				}
+			}
+		}
+	}
+
+	PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" program unit usage\n",
+		frameCount, (passName != NULL) ? passName : "(null)");
+	PipelineDebugPrint("[Pipeline Debug]    Limits: MAX_COMBINED_TEXTURE_IMAGE_UNITS=%d MAX_IMAGE_UNITS=%d\n",
+		maxCombinedTex, maxImageUnits);
+	PipelineDebugPrint("[Pipeline Debug]    Per-stage sampler limits VS=%d FS=%d CS=%d\n",
+		maxTexVS, maxTexFS, maxTexCS);
+	PipelineDebugPrint("[Pipeline Debug]    Per-stage image   limits VS=%d FS=%d CS=%d\n",
+		maxImgVS, maxImgFS, maxImgCS);
+	if (vsUsage.samplerUsed) {
+		PipelineDebugPrintUnitFlags("VS sampler", vsUsage.samplerUsed, vsUsage.samplerCapacity);
+	}
+	if (fsUsage.samplerUsed) {
+		PipelineDebugPrintUnitFlags("FS sampler", fsUsage.samplerUsed, fsUsage.samplerCapacity);
+	}
+	if (csUsage.samplerUsed) {
+		PipelineDebugPrintUnitFlags("CS sampler", csUsage.samplerUsed, csUsage.samplerCapacity);
+	}
+	if (vsUsage.imageUsed) {
+		PipelineDebugPrintUnitFlags("VS image", vsUsage.imageUsed, vsUsage.imageCapacity);
+	}
+	if (fsUsage.imageUsed) {
+		PipelineDebugPrintUnitFlags("FS image", fsUsage.imageUsed, fsUsage.imageCapacity);
+	}
+	if (csUsage.imageUsed) {
+		PipelineDebugPrintUnitFlags("CS image", csUsage.imageUsed, csUsage.imageCapacity);
+	}
+	if (combinedSamplerUsed) {
+		PipelineDebugPrintUnitFlags("Combined sampler", combinedSamplerUsed, combinedSamplerCapacity);
+	}
+
+	PipelineDebugCheckLimit("VS sampler units", vsUsage.samplerCount, maxTexVS);
+	PipelineDebugCheckLimit("FS sampler units", fsUsage.samplerCount, maxTexFS);
+	PipelineDebugCheckLimit("CS sampler units", csUsage.samplerCount, maxTexCS);
+	PipelineDebugCheckLimit("VS image units", vsUsage.imageCount, maxImgVS);
+	PipelineDebugCheckLimit("FS image units", fsUsage.imageCount, maxImgFS);
+	PipelineDebugCheckLimit("CS image units", csUsage.imageCount, maxImgCS);
+	PipelineDebugCheckLimit("Combined sampler units", combinedSamplerCount, maxCombinedTex);
+
+	if (maxImageUnits > 0) {
+		for (GLint unit = 0; unit < maxImageUnits; ++unit) {
+			GLint name = 0;
+			GLint level = 0;
+			GLint layered = 0;
+			GLint layer = 0;
+			GLint access = 0;
+			GLint format = 0;
+			PFNGLGETINTEGERI_VPROC getIntegeri_v = PipelineResolveGetIntegeriV();
+			if (getIntegeri_v == NULL) {
+				break;
+			}
+			getIntegeri_v(GL_IMAGE_BINDING_NAME, unit, &name);
+			if (name == 0) {
+				continue;
+			}
+			getIntegeri_v(GL_IMAGE_BINDING_LEVEL, unit, &level);
+			getIntegeri_v(GL_IMAGE_BINDING_LAYERED, unit, &layered);
+			getIntegeri_v(GL_IMAGE_BINDING_LAYER, unit, &layer);
+			getIntegeri_v(GL_IMAGE_BINDING_ACCESS, unit, &access);
+			getIntegeri_v(GL_IMAGE_BINDING_FORMAT, unit, &format);
+			PipelineDebugPrint("[Pipeline Debug]    IMAGE[%d] tex=%d level=%d layered=%d layer=%d access=0x%X format=0x%X\n",
+				unit, name, level, layered, layer, access, format);
+		}
+	}
+
+	if (combinedSamplerUsed) {
+		PipelineDebugFree(combinedSamplerUsed);
+	}
+	PipelineDebugStageUsageDispose(&vsUsage);
+	PipelineDebugStageUsageDispose(&fsUsage);
+	PipelineDebugStageUsageDispose(&csUsage);
+
+	if ((GLuint)prevProgram != programId) {
+		glExtUseProgram((GLuint)prevProgram);
+	}
+}
+
+static int s_debugLastProgramUsageReportFrame = -1;
+static void PipelineDebugReportProgramUnitUsageOncePerFrame(
+	int frameCount,
+	const char *passName
+){
+	if (frameCount == s_debugLastProgramUsageReportFrame) {
+		return;
+	}
+	s_debugLastProgramUsageReportFrame = frameCount;
+	PipelineDebugReportProgramUnitUsage(s_graphicsComputeProgramId, passName, frameCount);
+}
+
 static const char *PipelineDebugGetGlDebugSourceString(GLenum source){
 	switch (source) {
 		case GL_DEBUG_SOURCE_API: return "API";
@@ -827,6 +1453,7 @@ static bool PipelineExecuteComputePass(
 #endif
 
 	glExtUseProgram(s_graphicsComputeProgramId);
+	PipelineComputeEnsureBindingCache();
 	if (s_computePipelinePassUniformAvailable) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
@@ -858,13 +1485,17 @@ static bool PipelineExecuteComputePass(
 		}
 		GLenum internalformat = defaultInternalformat;
 		PipelineGetPixelFormatInfo(resource->pixelFormat, &internalformat, NULL, NULL);
-		switch (binding->access) {
-			case PipelineResourceAccessSampled:
-			case PipelineResourceAccessHistoryRead: {
-				GLuint samplerUnit = samplerUnitBase + samplerUnitCount;
-				glExtActiveTexture(GL_TEXTURE0 + samplerUnit);
-				glBindTexture(GL_TEXTURE_2D, textureId);
-				PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+			switch (binding->access) {
+				case PipelineResourceAccessSampled:
+				case PipelineResourceAccessHistoryRead: {
+					GLint cachedUnit = -1;
+					if (samplerUnitCount < s_computeSamplerBindingCount) {
+						cachedUnit = s_computeSamplerBindingUnits[samplerUnitCount];
+					}
+					GLuint samplerUnit = (cachedUnit >= 0) ? (GLuint)cachedUnit : (samplerUnitBase + samplerUnitCount);
+					glExtActiveTexture(GL_TEXTURE0 + samplerUnit);
+					glBindTexture(GL_TEXTURE_2D, textureId);
+					PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
 				boundSamplerUnits[numBoundSamplerUnits++] = samplerUnit;
 				++samplerUnitCount;
 #if ENABLE_PIPELINE_DEBUG_LOG
@@ -886,23 +1517,28 @@ static bool PipelineExecuteComputePass(
 				}
 #endif
 			} break;
-			case PipelineResourceAccessImageRead: {
-				GLenum format = internalformat;
-				const GLint mipLevel = 0;
-				GLint imageUnit = numBoundImageUnits;
-				glExtBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, GL_READ_ONLY, format);
-				GLenum imageBindError = glGetError();
+				case PipelineResourceAccessImageRead: {
+					GLenum format = internalformat;
+					const GLint mipLevel = 0;
+					GLint cachedUnit = -1;
+					if (numBoundImageUnits < s_computeImageBindingCount) {
+						cachedUnit = s_computeImageBindingUnits[numBoundImageUnits];
+					}
+					GLuint imageUnit = (GLuint)((cachedUnit >= 0) ? cachedUnit : numBoundImageUnits);
+					PipelineBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, GL_READ_ONLY, format);
+					GLenum imageBindError = glGetError();
 #if ENABLE_PIPELINE_DEBUG_LOG
-				if (imageBindError != GL_NO_ERROR) {
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, READ_ONLY) immediate error=%s(0x%04X)\n",
-						frameCount,
-						pass->name,
-						imageUnit,
-						textureId,
-						PipelineDebugGetGlErrorString(imageBindError),
-						imageBindError
-					);
-				}
+					if (imageBindError != GL_NO_ERROR) {
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, READ_ONLY) immediate error=%s(0x%04X)\n",
+							frameCount,
+							pass->name,
+							imageUnit,
+							textureId,
+							PipelineDebugGetGlErrorString(imageBindError),
+							imageBindError
+						);
+						PipelineDebugReportProgramUnitUsageOncePerFrame(frameCount, pass->name);
+					}
 #endif
 #if !ENABLE_PIPELINE_DEBUG_LOG
 				(void)imageBindError;
@@ -976,7 +1612,11 @@ static bool PipelineExecuteComputePass(
 				// when reading from a different history slot of the same resource via sampler
 				GLenum imageAccess = GL_WRITE_ONLY;
 				const GLint mipLevel = 0;
-				int imageUnit = numBoundImageUnits;
+				GLint cachedUnit = -1;
+				if (numBoundImageUnits < s_computeImageBindingCount) {
+					cachedUnit = s_computeImageBindingUnits[numBoundImageUnits];
+				}
+				GLuint imageUnit = (GLuint)((cachedUnit >= 0) ? cachedUnit : numBoundImageUnits);
 #if ENABLE_PIPELINE_DEBUG_LOG
 				if (debugLog) {
 					char drainLabel[128];
@@ -1020,20 +1660,21 @@ static bool PipelineExecuteComputePass(
 					// REMOVED: Unnecessary glBindTexture calls that interfere with image binding
 					// glBindTexture(GL_TEXTURE_2D, textureId);
 					// glBindTexture(GL_TEXTURE_2D, 0);
-					glExtBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, imageAccess, internalformat);
+					PipelineBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, imageAccess, internalformat);
 					GLenum imageBindError = glGetError();
 #if ENABLE_PIPELINE_DEBUG_LOG
-					if (imageBindError != GL_NO_ERROR) {
-						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, %s) immediate error=%s(0x%04X)\n",
-							frameCount,
-							pass->name,
-							imageUnit,
-							textureId,
-							(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
-							PipelineDebugGetGlErrorString(imageBindError),
-							imageBindError
-						);
-					}
+						if (imageBindError != GL_NO_ERROR) {
+							PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, %s) immediate error=%s(0x%04X)\n",
+								frameCount,
+								pass->name,
+								imageUnit,
+								textureId,
+								(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
+								PipelineDebugGetGlErrorString(imageBindError),
+								imageBindError
+							);
+							PipelineDebugReportProgramUnitUsageOncePerFrame(frameCount, pass->name);
+						}
 #endif
 #if !ENABLE_PIPELINE_DEBUG_LOG
 					(void)imageBindError;
@@ -1128,20 +1769,21 @@ static bool PipelineExecuteComputePass(
 				GLuint unit = boundImageUnits[i];
 				GLenum access = boundImageAccess[i];
 				GLenum unbindFormat = (defaultInternalformat != 0) ? defaultInternalformat : GL_RGBA8;
-				glExtBindImageTexture(unit, 0, 0, GL_FALSE, 0, access, unbindFormat);
+				PipelineBindImageTexture(unit, 0, 0, GL_FALSE, 0, access, unbindFormat);
 #if ENABLE_PIPELINE_DEBUG_LOG
-				GLenum unbindError = glGetError();
-				if (unbindError != GL_NO_ERROR) {
-					PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, UNBIND) immediate error=%s(0x%04X)\n",
-						frameCount,
-						pass->name,
-						unit,
-						PipelineDebugGetGlErrorString(unbindError),
-						unbindError
-					);
-				}
+					GLenum unbindError = glGetError();
+					if (unbindError != GL_NO_ERROR) {
+						PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, UNBIND) immediate error=%s(0x%04X)\n",
+							frameCount,
+							pass->name,
+							unit,
+							PipelineDebugGetGlErrorString(unbindError),
+							unbindError
+						);
+						PipelineDebugReportProgramUnitUsageOncePerFrame(frameCount, pass->name);
+					}
 #endif
-			}
+				}
 			for (int i = 0; i < numBoundSamplerUnits; ++i) {
 				glExtActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
 				glBindTexture(GL_TEXTURE_2D, 0);
@@ -1242,20 +1884,21 @@ static bool PipelineExecuteComputePass(
 		GLuint unit = boundImageUnits[i];
 		GLenum access = boundImageAccess[i];
 		GLenum unbindFormat = (defaultInternalformat != 0) ? defaultInternalformat : GL_RGBA8;
-		glExtBindImageTexture(unit, 0, 0, GL_FALSE, 0, access, unbindFormat);
+		PipelineBindImageTexture(unit, 0, 0, GL_FALSE, 0, access, unbindFormat);
 #if ENABLE_PIPELINE_DEBUG_LOG
-		GLenum unbindError = glGetError();
-		if (unbindError != GL_NO_ERROR) {
-			PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, UNBIND) immediate error=%s(0x%04X)\n",
-				frameCount,
-				pass->name,
-				unit,
-				PipelineDebugGetGlErrorString(unbindError),
-				unbindError
-			);
-		}
+			GLenum unbindError = glGetError();
+			if (unbindError != GL_NO_ERROR) {
+				PipelineDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" glBindImageTexture(unit=%d, UNBIND) immediate error=%s(0x%04X)\n",
+					frameCount,
+					pass->name,
+					unit,
+					PipelineDebugGetGlErrorString(unbindError),
+					unbindError
+				);
+				PipelineDebugReportProgramUnitUsageOncePerFrame(frameCount, pass->name);
+			}
 #endif
-	}
+		}
 	for (int i = 0; i < numBoundSamplerUnits; ++i) {
 		glExtActiveTexture(GL_TEXTURE0 + boundSamplerUnits[i]);
 		glBindTexture(GL_TEXTURE_2D, 0);
@@ -1816,6 +2459,10 @@ entrypoint(
 	if (s_glGetIntegeri_v == NULL) {
 		s_glGetIntegeri_v = (PFNGLGETINTEGERI_VPROC)wglGetProcAddress("glGetIntegeri_v");
 	}
+	s_glGetUniformiv = (PFNGLGETUNIFORMIVPROC)CallGl3wGetProcAddress("glGetUniformiv");
+	if (s_glGetUniformiv == NULL) {
+		s_glGetUniformiv = (PFNGLGETUNIFORMIVPROC)wglGetProcAddress("glGetUniformiv");
+	}
 #if ENABLE_PIPELINE_DEBUG_LOG
 	if (glExtDebugMessageCallback != NULL) {
 		glEnable(GL_DEBUG_OUTPUT);
@@ -1924,11 +2571,12 @@ entrypoint(
 		/* GLenum pname */		GL_COMPUTE_WORK_GROUP_SIZE,
 		/* GLint *params */		s_graphicsComputeWorkGroupSize
 	);
-	for (int i = 0; i < 3; ++i) {
-		if (s_graphicsComputeWorkGroupSize[i] <= 0) {
-			s_graphicsComputeWorkGroupSize[i] = 1;
+		for (int i = 0; i < 3; ++i) {
+			if (s_graphicsComputeWorkGroupSize[i] <= 0) {
+				s_graphicsComputeWorkGroupSize[i] = 1;
+			}
 		}
-	}
+		PipelineComputeInvalidateBindingCache();
 
 	
 	/* グラフィクス用コンピュートシェーダの作成 */
@@ -1947,6 +2595,7 @@ entrypoint(
 			s_graphicsComputeWorkGroupSize[i] = 1;
 		}
 	}
+	PipelineComputeInvalidateBindingCache();
 #if ENABLE_PIPELINE_DEBUG_LOG
 	{
 		if (s_glGetIntegeri_v != NULL) {
@@ -2105,6 +2754,7 @@ entrypoint(
 	if (s_graphicsComputeProgramId != 0) {
 		glExtDeleteProgram(s_graphicsComputeProgramId);
 		s_graphicsComputeProgramId = 0;
+		PipelineComputeInvalidateBindingCache();
 	}
 	PipelineResetRuntimeResources();
 
