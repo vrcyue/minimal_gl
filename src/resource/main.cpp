@@ -226,7 +226,13 @@ static bool s_computePipelinePassUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
 static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
 static GLuint s_graphicsComputeProgramId = 0;
+static GLint s_graphicsComputeUniformLocationUResult = -1;
+static GLint s_graphicsComputeUniformLocationUPrevResult = -1;
 static const char *s_graphicsComputeShaderSource = NULL;
+#if ENABLE_PIPELINE_DEBUG_LOG
+static int s_debugLastObservedUResultUnit = -9999;
+static int s_debugLastObservedUPrevResultUnit = -9999;
+#endif
 static bool PipelineIsSamplerType(GLenum type);
 static bool PipelineIsImageType(GLenum type);
 
@@ -394,6 +400,9 @@ static void PipelineComputeInvalidateBindingCache(void){
 	s_computeBindingUnitsCached = false;
 	s_computeSamplerBindingCount = 0;
 	s_computeImageBindingCount = 0;
+#if ENABLE_PIPELINE_DEBUG_LOG
+	PipelineDebugResetObservedUniformUnits();
+#endif
 }
 
 static PFNGLGETINTEGERI_VPROC PipelineResolveGetIntegeriV(void){
@@ -871,6 +880,112 @@ static int PipelineDebugDrainGlErrors(const char *label){
 	return drainedCount;
 }
 #if ENABLE_PIPELINE_DEBUG_LOG
+static void PipelineDebugResetObservedUniformUnits(void){
+	s_debugLastObservedUResultUnit = -9999;
+	s_debugLastObservedUPrevResultUnit = -9999;
+}
+
+static bool PipelineDebugFrameShouldLog(int frameCount){
+	if (frameCount < 0) {
+		return true;
+	}
+	return PipelineDebugShouldLog(frameCount);
+}
+
+static void PipelineDebugObserveComputeUniformUnits(const char *context, int frameCount, const char *passName){
+	if (!PipelineDebugFrameShouldLog(frameCount)) {
+		return;
+	}
+	if (s_graphicsComputeProgramId == 0) {
+		return;
+	}
+	PFNGLGETUNIFORMIVPROC getUniformiv = PipelineResolveGetUniformiv();
+	if (getUniformiv == NULL) {
+		return;
+	}
+	GLint uResultValue = -1;
+	GLint uPrevResultValue = -1;
+	bool hasResult = false;
+	bool hasPrevResult = false;
+	if (s_graphicsComputeUniformLocationUResult >= 0) {
+		getUniformiv(s_graphicsComputeProgramId, s_graphicsComputeUniformLocationUResult, &uResultValue);
+		hasResult = true;
+	}
+	if (s_graphicsComputeUniformLocationUPrevResult >= 0) {
+		getUniformiv(s_graphicsComputeProgramId, s_graphicsComputeUniformLocationUPrevResult, &uPrevResultValue);
+		hasPrevResult = true;
+	}
+	if (!hasResult && !hasPrevResult) {
+		return;
+	}
+	bool resultChanged = hasResult && (uResultValue != s_debugLastObservedUResultUnit);
+	bool prevChanged = hasPrevResult && (uPrevResultValue != s_debugLastObservedUPrevResultUnit);
+	const char *contextLabel = (context != NULL) ? context : "(unknown)";
+	const char *passLabel = (passName != NULL) ? passName : "(none)";
+	const char *resultNote = resultChanged ? " updated" : "";
+	const char *prevNote = prevChanged ? " updated" : "";
+	PipelineDebugPrint("[Pipeline Debug] frame %d compute uniform slots context=\"%s\" pass=\"%s\" u_result=%d%s u_prevResult=%d%s\n",
+		frameCount,
+		contextLabel,
+		passLabel,
+		hasResult ? uResultValue : -1,
+		resultNote,
+		hasPrevResult ? uPrevResultValue : -1,
+		prevNote
+	);
+	if (hasResult) {
+		s_debugLastObservedUResultUnit = uResultValue;
+	}
+	if (hasPrevResult) {
+		s_debugLastObservedUPrevResultUnit = uPrevResultValue;
+	}
+}
+
+static void PipelineDebugTrackComputeUniformWrite(
+	int frameCount,
+	const char *passName,
+	const char *context,
+	GLuint programId,
+	GLint location,
+	GLint value
+){
+	if (programId == 0 || programId != s_graphicsComputeProgramId) {
+		return;
+	}
+	bool matchesResult = (s_graphicsComputeUniformLocationUResult >= 0 && location == s_graphicsComputeUniformLocationUResult);
+	bool matchesPrev = (s_graphicsComputeUniformLocationUPrevResult >= 0 && location == s_graphicsComputeUniformLocationUPrevResult);
+	if (!matchesResult && !matchesPrev) {
+		return;
+	}
+	if (!PipelineDebugFrameShouldLog(frameCount)) {
+		return;
+	}
+	const char *target = matchesResult ? "u_result" : "u_prevResult";
+	const char *contextLabel = (context != NULL) ? context : "(unknown)";
+	const char *passLabel = (passName != NULL) ? passName : "(none)";
+	PipelineDebugPrint("[Pipeline Debug] frame %d compute uniform write context=\"%s\" pass=\"%s\" target=%s location=%d value=%d program=%u\n",
+		frameCount,
+		contextLabel,
+		passLabel,
+		target,
+		location,
+		value,
+		(unsigned int)programId
+	);
+	if (matchesResult) {
+		s_debugLastObservedUResultUnit = value;
+	}
+	if (matchesPrev) {
+		s_debugLastObservedUPrevResultUnit = value;
+	}
+}
+#else
+static void PipelineDebugResetObservedUniformUnits(void){}
+static void PipelineDebugObserveComputeUniformUnits(const char *, int, const char *){}
+static void PipelineDebugTrackComputeUniformWrite(int, const char *, const char *, GLuint, GLint, GLint){}
+#endif
+
+#if ENABLE_PIPELINE_DEBUG_LOG
 static void *PipelineDebugAllocZero(size_t size){
 	if (size == 0) {
 		return NULL;
@@ -1090,6 +1205,22 @@ static void PipelineDebugReportProgramUnitUsage(
 	};
 	GLint values[6] = {0, 0, 0, 0, 0, 0};
 	for (int uniformIndex = 0; uniformIndex < numUniforms; ++uniformIndex) {
+		char uniformName[PIPELINE_MAX_RESOURCE_ID_LENGTH] = {0};
+		if (glExtGetProgramResourceName != NULL) {
+			GLsizei written = 0;
+			GLsizei capacity = (GLsizei)(PIPELINE_MAX_RESOURCE_ID_LENGTH - 1);
+			glExtGetProgramResourceName(
+				programId,
+				GL_UNIFORM,
+				(GLuint)uniformIndex,
+				capacity,
+				&written,
+				uniformName
+			);
+			if (written >= capacity) {
+				uniformName[PIPELINE_MAX_RESOURCE_ID_LENGTH - 1] = '\0';
+			}
+		}
 		glExtGetProgramResourceiv(
 			/* GLuint program */			programId,
 			/* GLenum programInterface */	GL_UNIFORM,
@@ -1106,6 +1237,18 @@ static void PipelineDebugReportProgramUnitUsage(
 		bool refVS = (values[3] != 0);
 		bool refFS = (values[4] != 0);
 		bool refCS = (values[5] != 0);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugPrint("[Pipeline Debug] program unit usage uniform index=%d name=\"%s\" type=0x%04X location=%d arraySize=%d refVS=%d refFS=%d refCS=%d\n",
+			uniformIndex,
+			(*uniformName != '\0') ? uniformName : "(unknown)",
+			(GLuint)type,
+			location,
+			arraySize,
+			refVS ? 1 : 0,
+			refFS ? 1 : 0,
+			refCS ? 1 : 0
+		);
+#endif
 		if (location < 0) {
 			continue;
 		}
@@ -1124,6 +1267,16 @@ static void PipelineDebugReportProgramUnitUsage(
 			if (getUniformiv != NULL) {
 				getUniformiv(programId, elementLocation, &unit);
 			}
+#if ENABLE_PIPELINE_DEBUG_LOG
+			PipelineDebugPrint("[Pipeline Debug] program unit usage uniform \"%s\" element=%d location=%d rawUnit=%d isSampler=%d isImage=%d\n",
+				(*uniformName != '\0') ? uniformName : "(unknown)",
+				element,
+				elementLocation,
+				unit,
+				isSampler ? 1 : 0,
+				isImage ? 1 : 0
+			);
+#endif
 			if (unit < 0) {
 				continue;
 			}
@@ -1733,10 +1886,21 @@ static bool PipelineExecuteComputePass(
 				s_computeImageBindingUnits[imageIndex]
 			);
 		}
+		PipelineDebugObserveComputeUniformUnits("postEnsureBindingCache", frameCount, pass->name);
 	}
 #endif
 	if (s_computePipelinePassUniformAvailable) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"compute pass pipeline index",
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
+			s_activePipelinePassIndex
+		);
+#endif
 	}
 #if ENABLE_PIPELINE_DEBUG_LOG
 	if (debugLog) {
@@ -1807,6 +1971,17 @@ static bool PipelineExecuteComputePass(
 						cachedUnit = s_computeImageBindingUnits[numBoundImageUnits];
 					}
 					GLuint imageUnit = (GLuint)((cachedUnit >= 0) ? cachedUnit : numBoundImageUnits);
+#if ENABLE_PIPELINE_DEBUG_LOG
+					PipelineDebugPrint("[Pipeline Debug] image bind request frame %d pass \"%s\" resource=\"%s\" access=READ historyOffset=%d cachedUnit=%d resolvedUnit=%u textureId=%u\n",
+						frameCount,
+						pass->name,
+						resource->id,
+						binding->historyOffset,
+						cachedUnit,
+						imageUnit,
+						textureId
+					);
+#endif
 					PipelineBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, GL_READ_ONLY, format);
 					GLenum imageBindError = glGetError();
 #if ENABLE_PIPELINE_DEBUG_LOG
@@ -1901,6 +2076,16 @@ static bool PipelineExecuteComputePass(
 				}
 				GLuint imageUnit = (GLuint)((cachedUnit >= 0) ? cachedUnit : numBoundImageUnits);
 #if ENABLE_PIPELINE_DEBUG_LOG
+				PipelineDebugPrint("[Pipeline Debug] image bind request frame %d pass \"%s\" resource=\"%s\" access=%s historyOffset=%d cachedUnit=%d resolvedUnit=%u textureId=%u\n",
+					frameCount,
+					pass->name,
+					resource->id,
+					(imageAccess == GL_READ_WRITE) ? "READ_WRITE" : "WRITE_ONLY",
+					binding->historyOffset,
+					cachedUnit,
+					imageUnit,
+					textureId
+				);
 				if (debugLog) {
 					char drainLabel[128];
 					wsprintfA(
@@ -1943,6 +2128,18 @@ static bool PipelineExecuteComputePass(
 					// REMOVED: Unnecessary glBindTexture calls that interfere with image binding
 					// glBindTexture(GL_TEXTURE_2D, textureId);
 					// glBindTexture(GL_TEXTURE_2D, 0);
+#if ENABLE_PIPELINE_DEBUG_LOG
+					if (debugLog) {
+						char uniformContext[128];
+						wsprintfA(
+							uniformContext,
+							"preImageBind output=%d unit=%u",
+							outputIndex,
+							imageUnit
+						);
+						PipelineDebugObserveComputeUniformUnits(uniformContext, frameCount, pass->name);
+					}
+#endif
 					PipelineBindImageTexture(imageUnit, textureId, mipLevel, GL_FALSE, 0, imageAccess, internalformat);
 					GLenum imageBindError = glGetError();
 #if ENABLE_PIPELINE_DEBUG_LOG
@@ -1958,6 +2155,18 @@ static bool PipelineExecuteComputePass(
 							);
 							PipelineDebugReportProgramUnitUsageOncePerFrame(frameCount, pass->name);
 						}
+#endif
+#if ENABLE_PIPELINE_DEBUG_LOG
+					if (debugLog) {
+						char uniformContextAfter[128];
+						wsprintfA(
+							uniformContextAfter,
+							"postImageBind output=%d unit=%u",
+							outputIndex,
+							imageUnit
+						);
+						PipelineDebugObserveComputeUniformUnits(uniformContextAfter, frameCount, pass->name);
+					}
 #endif
 #if !ENABLE_PIPELINE_DEBUG_LOG
 					(void)imageBindError;
@@ -2083,7 +2292,27 @@ static bool PipelineExecuteComputePass(
 	}
 
 	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	PipelineDebugTrackComputeUniformWrite(
+		frameCount,
+		pass->name,
+		"compute pass waveOutPos",
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_WAVE_OUT_POS,
+		waveOutPos
+	);
+#endif
 	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	PipelineDebugTrackComputeUniformWrite(
+		frameCount,
+		pass->name,
+		"compute pass frameCount",
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_FRAME_COUNT,
+		frameCount
+	);
+#endif
 	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
 	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
 	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
@@ -2219,6 +2448,16 @@ static bool PipelineExecuteFragmentPass(
 	glExtUseProgram(fragmentProgramId);
 	if (s_fragmentPipelinePassUniformAvailable) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"fragment pass pipeline index",
+			fragmentProgramId,
+			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
+			s_activePipelinePassIndex
+		);
+#endif
 	}
 #if ENABLE_PIPELINE_DEBUG_LOG
 	bool debugLog = PipelineDebugShouldLog(frameCount);
@@ -2399,7 +2638,27 @@ static bool PipelineExecuteFragmentPass(
 	glExtActiveTexture(GL_TEXTURE0);
 
 	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	PipelineDebugTrackComputeUniformWrite(
+		frameCount,
+		pass->name,
+		"fragment pass waveOutPos",
+		fragmentProgramId,
+		UNIFORM_LOCATION_WAVE_OUT_POS,
+		waveOutPos
+	);
+#endif
 	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	PipelineDebugTrackComputeUniformWrite(
+		frameCount,
+		pass->name,
+		"fragment pass frameCount",
+		fragmentProgramId,
+		UNIFORM_LOCATION_FRAME_COUNT,
+		frameCount
+	);
+#endif
 	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
 	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
 	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
@@ -2444,6 +2703,16 @@ static bool PipelineExecuteFragmentPass(
 
 	if (enableFrameCountUniform) {
 		glExtUniform1i(1, frameCount);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"fragment pass optional frameCount",
+			fragmentProgramId,
+			1,
+			frameCount
+		);
+#endif
 	}
 
 	return true;
@@ -2828,6 +3097,16 @@ entrypoint(
 			/* GLint location */	0,
 			/* GLfloat v0 */		i
 		);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugTrackComputeUniformWrite(
+			-1,
+			NULL,
+			"sound dispatch offset",
+			soundCsProgramId,
+			0,
+			i
+		);
+#endif
 		glExtDispatchCompute(
 			/* GLuint num_groups_x */	NUM_SOUND_BUFFER_SAMPLES_PER_DISPATCH,
 			/* GLuint num_groups_y */	1,
@@ -2881,6 +3160,65 @@ entrypoint(
 		}
 	}
 	PipelineComputeInvalidateBindingCache();
+#if ENABLE_PIPELINE_DEBUG_LOG
+	{
+		glExtUseProgram(s_graphicsComputeProgramId);
+		PipelineComputeParseDeclaredBindings();
+		PFNGLGETUNIFORMIVPROC getUniformiv = PipelineResolveGetUniformiv();
+		GLint uResultLocation = -1;
+		GLint uPrevResultLocation = -1;
+		if (glExtGetUniformLocation != NULL) {
+			uResultLocation = glExtGetUniformLocation(s_graphicsComputeProgramId, "u_result");
+			uPrevResultLocation = glExtGetUniformLocation(s_graphicsComputeProgramId, "u_prevResult");
+		}
+		s_graphicsComputeUniformLocationUResult = uResultLocation;
+		s_graphicsComputeUniformLocationUPrevResult = uPrevResultLocation;
+		PipelineDebugResetObservedUniformUnits();
+		if (getUniformiv != NULL) {
+			GLint uResultInitial = -1;
+			GLint uPrevResultInitial = -1;
+			if (uResultLocation >= 0) {
+				getUniformiv(s_graphicsComputeProgramId, uResultLocation, &uResultInitial);
+			}
+			if (uPrevResultLocation >= 0) {
+				getUniformiv(s_graphicsComputeProgramId, uPrevResultLocation, &uPrevResultInitial);
+			}
+			PipelineDebugPrint("[Pipeline Debug] compute program init uniform \"u_result\" location=%d initialUnit=%d\n",
+				uResultLocation,
+				uResultInitial
+			);
+			PipelineDebugPrint("[Pipeline Debug] compute program init uniform \"u_prevResult\" location=%d initialUnit=%d\n",
+				uPrevResultLocation,
+				uPrevResultInitial
+			);
+			if (uResultLocation >= 0) {
+				int declaredBinding = PipelineComputeLookupDeclaredBinding("u_result", true);
+				if (declaredBinding >= 0) {
+					glExtUniform1i(uResultLocation, declaredBinding);
+					PipelineDebugTrackComputeUniformWrite(
+						-1,
+						NULL,
+						"compute program init force u_result",
+						s_graphicsComputeProgramId,
+						uResultLocation,
+						declaredBinding
+					);
+					GLint uResultForced = -1;
+					getUniformiv(s_graphicsComputeProgramId, uResultLocation, &uResultForced);
+					PipelineDebugPrint("[Pipeline Debug] compute program forced uniform \"u_result\" to declared binding=%d verifiedUnit=%d\n",
+						declaredBinding,
+						uResultForced
+					);
+				} else {
+					PipelineDebugPrint("[Pipeline Debug] compute program could not find declared binding for \"u_result\"\n");
+				}
+			}
+		} else {
+			PipelineDebugPrint("[Pipeline Debug] compute program init uniform values unavailable (glGetUniformiv missing)\n");
+		}
+		PipelineDebugObserveComputeUniformUnits("program init", -1, NULL);
+	}
+#endif
 #if ENABLE_PIPELINE_DEBUG_LOG
 	{
 		if (s_glGetIntegeri_v != NULL) {
@@ -3040,6 +3378,11 @@ entrypoint(
 		glExtDeleteProgram(s_graphicsComputeProgramId);
 		s_graphicsComputeProgramId = 0;
 		PipelineComputeInvalidateBindingCache();
+		s_graphicsComputeUniformLocationUResult = -1;
+		s_graphicsComputeUniformLocationUPrevResult = -1;
+#if ENABLE_PIPELINE_DEBUG_LOG
+		PipelineDebugResetObservedUniformUnits();
+#endif
 	}
 	PipelineResetRuntimeResources();
 
