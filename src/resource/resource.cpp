@@ -38,6 +38,8 @@ char g_concatenatedString_align0[] =
 	"glUniform3i\0"					/* 頻出ワードを持たないので先に配置 */
 	"glBindImageTexture\0"			/* 頻出ワードを持たないので先に配置 */
 	"glMemoryBarrier\0"				/* 頻出ワードを持たないので先に配置 */
+	"glDebugMessageCallback\0"		/* 頻出ワードを持たないので先に配置 */
+	"glDebugMessageControl\0"		/* 頻出ワードを持たないので先に配置 */
 #if ENABLE_MIPMAP_GENERATION
 	"glGenerateMipmap\0"			/* 既出ワードを持たないので先に配置 */
 #endif
@@ -93,6 +95,8 @@ typedef enum {
 	GlExtUniform3i,
 	GlExtBindImageTexture,
 	GlExtMemoryBarrier,
+	GlExtDebugMessageCallback,
+	GlExtDebugMessageControl,
 #if ENABLE_MIPMAP_GENERATION
 	GlExtGenerateMipmap,
 #endif
@@ -136,6 +140,8 @@ typedef enum {
 #define glExtUniform3i				((PFNGLUNIFORM3IPROC)           s_glExtFunctions[GlExtUniform3i])
 #define glExtBindImageTexture		((PFNGLBINDIMAGETEXTUREPROC)   s_glExtFunctions[GlExtBindImageTexture])
 #define glExtMemoryBarrier			((PFNGLMEMORYBARRIERPROC)       s_glExtFunctions[GlExtMemoryBarrier])
+#define glExtDebugMessageCallback	((PFNGLDEBUGMESSAGECALLBACKPROC)s_glExtFunctions[GlExtDebugMessageCallback])
+#define glExtDebugMessageControl	((PFNGLDEBUGMESSAGECONTROLPROC) s_glExtFunctions[GlExtDebugMessageControl])
 #if ENABLE_MIPMAP_GENERATION
 #define glExtGenerateMipmap			((PFNGLGENERATEMIPMAPPROC)      s_glExtFunctions[GlExtGenerateMipmap])
 #endif

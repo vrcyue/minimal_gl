@@ -15,6 +15,13 @@
 	やむを得ず、gl3w 関連の API 呼び出しはここに隔離して実行する。
 */
 bool CallGl3wInit(){
-	return gl3wInit();
+	return gl3wInit() == GL3W_OK;
 }
 
+void *CallGl3wGetProcAddress(const char *procName){
+	return (void *)gl3wGetProcAddress(procName);
+}
+
+PFNGLBINDIMAGETEXTUREPROC CallGl3wGetBindImageTexture(){
+	return glBindImageTexture;
+}
