@@ -135,6 +135,8 @@ static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESO
 static int s_activePipelinePassIndex = -1;
 static bool s_fragmentPipelinePassUniformAvailable = false;
 static bool s_computePipelinePassUniformAvailable = false;
+static bool s_computeFrameCountUniformAvailable = false;
+static bool s_computeWaveOutUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
 
 /*=============================================================================
@@ -560,8 +562,12 @@ static bool PipelineExecuteComputePass(
 		return false;
 	}
 
-	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
-	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	if (s_computeWaveOutUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	}
+	if (s_computeFrameCountUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	}
 	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
 	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
 	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
@@ -1111,8 +1117,20 @@ entrypoint(
 			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
 			GL_INT
 		);
+		s_computeFrameCountUniformAvailable = PipelineProgramHasUniform(
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_FRAME_COUNT,
+			GL_INT
+		);
+		s_computeWaveOutUniformAvailable = PipelineProgramHasUniform(
+			s_graphicsComputeProgramId,
+			UNIFORM_LOCATION_WAVE_OUT_POS,
+			GL_INT
+		);
 	} else {
 		s_computePipelinePassUniformAvailable = false;
+		s_computeFrameCountUniformAvailable = false;
+		s_computeWaveOutUniformAvailable = false;
 	}
 
 	/* フラグメントシェーダの作成 */
@@ -1226,6 +1244,9 @@ entrypoint(
 	if (s_graphicsComputeProgramId != 0) {
 		glExtDeleteProgram(s_graphicsComputeProgramId);
 		s_graphicsComputeProgramId = 0;
+		s_computePipelinePassUniformAvailable = false;
+		s_computeFrameCountUniformAvailable = false;
+		s_computeWaveOutUniformAvailable = false;
 	}
 	PipelineResetRuntimeResources();
 
