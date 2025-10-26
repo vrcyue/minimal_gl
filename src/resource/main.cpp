@@ -222,9 +222,17 @@ static PipelineDescription s_pipelineDescription = {0};
 static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESOURCES] = {{0}};
 static int s_activePipelinePassIndex = -1;
 static bool s_fragmentPipelinePassUniformAvailable = false;
+static bool s_fragmentWaveOutUniformAvailable = false;
+static bool s_fragmentFrameCountUniformAvailable = false;
+static bool s_fragmentTimeUniformAvailable = false;
+static bool s_fragmentResolutionUniformAvailable = false;
+static bool s_fragmentMouseButtonsUniformAvailable = false;
 static bool s_computePipelinePassUniformAvailable = false;
 static bool s_computeFrameCountUniformAvailable = false;
 static bool s_computeWaveOutUniformAvailable = false;
+static bool s_computeTimeUniformAvailable = false;
+static bool s_computeResolutionUniformAvailable = false;
+static bool s_computeMouseButtonsUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
 static GLint s_graphicsComputeWorkGroupSize[3] = {1, 1, 1};
 static GLuint s_graphicsComputeProgramId = 0;
@@ -2326,9 +2334,15 @@ static bool PipelineExecuteComputePass(
 		);
 #endif
 	}
-	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
-	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
-	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+	if (s_computeTimeUniformAvailable) {
+		glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+	}
+	if (s_computeResolutionUniformAvailable) {
+		glExtUniform2f(UNIFORM_LOCATION_RESO, (float)SCREEN_WIDTH, (float)SCREEN_HEIGHT);
+	}
+	if (s_computeMouseButtonsUniformAvailable) {
+		glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+	}
 
 	GLuint workGroupSizeX = s_graphicsComputeWorkGroupSize[0] > 0? (GLuint)s_graphicsComputeWorkGroupSize[0]: 1;
 	GLuint workGroupSizeY = s_graphicsComputeWorkGroupSize[1] > 0? (GLuint)s_graphicsComputeWorkGroupSize[1]: 1;
@@ -2650,31 +2664,41 @@ static bool PipelineExecuteFragmentPass(
 	}
 	glExtActiveTexture(GL_TEXTURE0);
 
-	glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
+	if (s_fragmentWaveOutUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
 #if ENABLE_PIPELINE_DEBUG_LOG
-	PipelineDebugTrackComputeUniformWrite(
-		frameCount,
-		pass->name,
-		"fragment pass waveOutPos",
-		fragmentProgramId,
-		UNIFORM_LOCATION_WAVE_OUT_POS,
-		waveOutPos
-	);
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"fragment pass waveOutPos",
+			fragmentProgramId,
+			UNIFORM_LOCATION_WAVE_OUT_POS,
+			waveOutPos
+		);
 #endif
-	glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
+	}
+	if (s_fragmentFrameCountUniformAvailable) {
+		glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
 #if ENABLE_PIPELINE_DEBUG_LOG
-	PipelineDebugTrackComputeUniformWrite(
-		frameCount,
-		pass->name,
-		"fragment pass frameCount",
-		fragmentProgramId,
-		UNIFORM_LOCATION_FRAME_COUNT,
-		frameCount
-	);
+		PipelineDebugTrackComputeUniformWrite(
+			frameCount,
+			pass->name,
+			"fragment pass frameCount",
+			fragmentProgramId,
+			UNIFORM_LOCATION_FRAME_COUNT,
+			frameCount
+		);
 #endif
-	glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
-	glExtUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
-	glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+	}
+	if (s_fragmentTimeUniformAvailable) {
+		glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
+	}
+	if (s_fragmentResolutionUniformAvailable) {
+		glExtUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
+	}
+	if (s_fragmentMouseButtonsUniformAvailable) {
+		glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
+	}
 
 	GLfloat vertices[] = {
 		-1.0f, -1.0f,
@@ -3275,24 +3299,42 @@ entrypoint(
 			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
 			GL_INT
 		);
-		s_computeFrameCountUniformAvailable = PipelineProgramHasUniform(
-			s_graphicsComputeProgramId,
-			UNIFORM_LOCATION_FRAME_COUNT,
-			GL_INT
-		);
-		s_computeWaveOutUniformAvailable = PipelineProgramHasUniform(
-			s_graphicsComputeProgramId,
-			UNIFORM_LOCATION_WAVE_OUT_POS,
-			GL_INT
-		);
-	} else {
-		s_computePipelinePassUniformAvailable = false;
-		s_computeFrameCountUniformAvailable = false;
-		s_computeWaveOutUniformAvailable = false;
-	}
+	s_computeFrameCountUniformAvailable = PipelineProgramHasUniform(
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_FRAME_COUNT,
+		GL_INT
+	);
+	s_computeWaveOutUniformAvailable = PipelineProgramHasUniform(
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_WAVE_OUT_POS,
+		GL_INT
+	);
+	s_computeTimeUniformAvailable = PipelineProgramHasUniform(
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_TIME,
+		GL_FLOAT
+	);
+	s_computeResolutionUniformAvailable = PipelineProgramHasUniform(
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_RESO,
+		GL_FLOAT_VEC2
+	);
+	s_computeMouseButtonsUniformAvailable = PipelineProgramHasUniform(
+		s_graphicsComputeProgramId,
+		UNIFORM_LOCATION_MOUSE_BUTTONS,
+		GL_INT_VEC3
+	);
+} else {
+	s_computePipelinePassUniformAvailable = false;
+	s_computeFrameCountUniformAvailable = false;
+	s_computeWaveOutUniformAvailable = false;
+	s_computeTimeUniformAvailable = false;
+	s_computeResolutionUniformAvailable = false;
+	s_computeMouseButtonsUniformAvailable = false;
+}
 
-	/* フラグメントシェーダの作成 */
-	int graphicsFsProgramId = glExtCreateShaderProgramv(
+/* フラグメントシェーダの作成 */
+int graphicsFsProgramId = glExtCreateShaderProgramv(
 		/* GLenum type */				GL_FRAGMENT_SHADER,
 		/* GLsizei count */			1,
 		/* const GLchar* const *strings */	graphicsFragmentShaderCodes
@@ -3308,8 +3350,38 @@ entrypoint(
 			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
 			GL_INT
 		);
+		s_fragmentWaveOutUniformAvailable = PipelineProgramHasUniform(
+			graphicsFsProgramId,
+			UNIFORM_LOCATION_WAVE_OUT_POS,
+			GL_INT
+		);
+		s_fragmentFrameCountUniformAvailable = PipelineProgramHasUniform(
+			graphicsFsProgramId,
+			UNIFORM_LOCATION_FRAME_COUNT,
+			GL_INT
+		);
+		s_fragmentTimeUniformAvailable = PipelineProgramHasUniform(
+			graphicsFsProgramId,
+			UNIFORM_LOCATION_TIME,
+			GL_FLOAT
+		);
+		s_fragmentResolutionUniformAvailable = PipelineProgramHasUniform(
+			graphicsFsProgramId,
+			UNIFORM_LOCATION_RESO,
+			GL_FLOAT_VEC2
+		);
+		s_fragmentMouseButtonsUniformAvailable = PipelineProgramHasUniform(
+			graphicsFsProgramId,
+			UNIFORM_LOCATION_MOUSE_BUTTONS,
+			GL_INT_VEC3
+		);
 	} else {
 		s_fragmentPipelinePassUniformAvailable = false;
+		s_fragmentWaveOutUniformAvailable = false;
+		s_fragmentFrameCountUniformAvailable = false;
+		s_fragmentTimeUniformAvailable = false;
+		s_fragmentResolutionUniformAvailable = false;
+		s_fragmentMouseButtonsUniformAvailable = false;
 	}
 
 	PipelineMemcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));
@@ -3408,6 +3480,9 @@ entrypoint(
 		s_computePipelinePassUniformAvailable = false;
 		s_computeFrameCountUniformAvailable = false;
 		s_computeWaveOutUniformAvailable = false;
+		s_computeTimeUniformAvailable = false;
+		s_computeResolutionUniformAvailable = false;
+		s_computeMouseButtonsUniformAvailable = false;
 #if ENABLE_PIPELINE_DEBUG_LOG
 		PipelineDebugResetObservedUniformUnits();
 #endif
