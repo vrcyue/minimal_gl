@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdarg.h>
 #include "common.h"
 #include "app.h"
 #include "graphics.h"
@@ -112,6 +113,132 @@ static bool GraphicsExecuteComputePassPipeline(
 	const CurrentFrameParams *params,
 	const RenderSettings *settings
 );
+
+#ifndef ENABLE_PIPELINE_DEBUG_LOG
+#define ENABLE_PIPELINE_DEBUG_LOG 1
+#endif
+
+#if ENABLE_PIPELINE_DEBUG_LOG
+static HANDLE GraphicsDebugGetFileHandle(){
+	static HANDLE s_handle = INVALID_HANDLE_VALUE;
+	if (s_handle == INVALID_HANDLE_VALUE) {
+		s_handle = CreateFileA(
+			"pipeline_debug_log.txt",
+			FILE_APPEND_DATA,
+			FILE_SHARE_READ,
+			NULL,
+			OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL,
+			NULL
+		);
+		if (s_handle != INVALID_HANDLE_VALUE) {
+			SetFilePointer(s_handle, 0, NULL, FILE_END);
+		}
+	}
+	return s_handle;
+}
+
+static void GraphicsDebugPrint(const char *format, ...){
+	HANDLE fileHandle = GraphicsDebugGetFileHandle();
+	if (fileHandle == INVALID_HANDLE_VALUE) {
+		return;
+	}
+
+	char buffer[512];
+	va_list args;
+	va_start(args, format);
+	int length = wvsprintfA(buffer, format, args);
+	va_end(args);
+	if (length <= 0) {
+		return;
+	}
+
+	DWORD bytesWritten = 0;
+	WriteFile(
+		fileHandle,
+		buffer,
+		(DWORD)length,
+		&bytesWritten,
+		NULL
+	);
+}
+
+static const char *GraphicsDebugGetGlErrorString(GLenum error){
+	switch (error) {
+		case GL_NO_ERROR: return "GL_NO_ERROR";
+		case GL_INVALID_ENUM: return "GL_INVALID_ENUM";
+		case GL_INVALID_VALUE: return "GL_INVALID_VALUE";
+		case GL_INVALID_OPERATION: return "GL_INVALID_OPERATION";
+		case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION";
+		case GL_OUT_OF_MEMORY: return "GL_OUT_OF_MEMORY";
+		default: return "GL_UNKNOWN_ERROR";
+	}
+}
+
+static int GraphicsDebugDrainGlErrors(const char *label){
+	int count = 0;
+	for (;;) {
+		GLenum error = glGetError();
+		if (error == GL_NO_ERROR) {
+			break;
+		}
+		++count;
+		GraphicsDebugPrint("[Pipeline Debug] editor %s drained error=%s(0x%04X)\n",
+			label,
+			GraphicsDebugGetGlErrorString(error),
+			error
+		);
+	}
+	return count;
+}
+
+static bool GraphicsDebugShouldLog(int frameCount){
+	static int s_remainingFrames = 32;
+	static int s_lastFrame = -1;
+	if (s_remainingFrames <= 0) {
+		return false;
+	}
+	if (frameCount != s_lastFrame) {
+		s_lastFrame = frameCount;
+		--s_remainingFrames;
+	}
+	return true;
+}
+
+static const char *GraphicsDebugImageAccessString(GLenum access){
+	switch (access) {
+		case GL_READ_ONLY: return "READ_ONLY";
+		case GL_WRITE_ONLY: return "WRITE_ONLY";
+		case GL_READ_WRITE: return "READ_WRITE";
+		default: return "UNKNOWN";
+	}
+}
+
+static void GraphicsDebugLogImageUnitState(const char *phase, GLint unit){
+	GLint name = 0;
+	GLint level = 0;
+	GLint layered = 0;
+	GLint layer = 0;
+	GLint access = 0;
+	GLint format = 0;
+	glGetIntegeri_v(GL_IMAGE_BINDING_NAME, unit, &name);
+	glGetIntegeri_v(GL_IMAGE_BINDING_LEVEL, unit, &level);
+	glGetIntegeri_v(GL_IMAGE_BINDING_LAYERED, unit, &layered);
+	glGetIntegeri_v(GL_IMAGE_BINDING_LAYER, unit, &layer);
+	glGetIntegeri_v(GL_IMAGE_BINDING_ACCESS, unit, &access);
+	glGetIntegeri_v(GL_IMAGE_BINDING_FORMAT, unit, &format);
+	GraphicsDebugPrint("[Pipeline Debug] editor image unit state phase=\"%s\" unit=%d tex=%d level=%d layered=%d layer=%d access=%s format=0x%04X\n",
+		phase,
+		unit,
+		name,
+		level,
+		layered,
+		layer,
+		GraphicsDebugImageAccessString((GLenum)access),
+		format
+	);
+}
+#endif /* ENABLE_PIPELINE_DEBUG_LOG */
 static bool GraphicsExecuteFragmentPassPipeline(
 	const PipelineDescription *pipeline,
 	const PipelinePass *pass,
@@ -960,6 +1087,20 @@ static bool GraphicsExecuteComputePassPipeline(
 		return false;
 	}
 
+#if ENABLE_PIPELINE_DEBUG_LOG
+	const int debugFrameCount = params->frameCount;
+	const char *debugPassName = pass->name;
+	const bool debugLog = GraphicsDebugShouldLog(debugFrameCount);
+	int preExistingErrors = GraphicsDebugDrainGlErrors("compute pass (editor) ENTRY");
+	if (preExistingErrors > 0) {
+		GraphicsDebugPrint("[Pipeline Debug] editor frame %d compute pass \"%s\" ENTRY drained %d pre-existing GL errors\n",
+			debugFrameCount,
+			debugPassName,
+			preExistingErrors
+		);
+	}
+#endif
+
 	GlPixelFormatInfo defaultPixelFormatInfo = PixelFormatToGlPixelFormatInfo(settings->pixelFormat);
 
 	GLuint samplerUnitBase = COMPUTE_TEXTURE_START_INDEX;
@@ -1017,6 +1158,24 @@ static bool GraphicsExecuteComputePassPipeline(
 					GL_READ_ONLY,
 					internalformat
 				);
+#if ENABLE_PIPELINE_DEBUG_LOG
+				{
+					GLenum bindError = glGetError();
+					if (bindError != GL_NO_ERROR || debugLog) {
+						GraphicsDebugPrint("[Pipeline Debug] editor frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, access=%s, format=0x%04X) error=%s(0x%04X)\n",
+							debugFrameCount,
+							debugPassName,
+							unit,
+							textureId,
+							GraphicsDebugImageAccessString(GL_READ_ONLY),
+							internalformat,
+							GraphicsDebugGetGlErrorString(bindError),
+							bindError
+						);
+						GraphicsDebugLogImageUnitState("after image bind (input)", unit);
+					}
+				}
+#endif
 				boundImageUnits[numBoundImageUnits] = unit;
 				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
 				++numBoundImageUnits;
@@ -1060,6 +1219,24 @@ static bool GraphicsExecuteComputePassPipeline(
 					GL_WRITE_ONLY,
 					internalformat
 				);
+#if ENABLE_PIPELINE_DEBUG_LOG
+				{
+					GLenum bindError = glGetError();
+					if (bindError != GL_NO_ERROR || debugLog) {
+						GraphicsDebugPrint("[Pipeline Debug] editor frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=%u, access=%s, format=0x%04X) error=%s(0x%04X)\n",
+							debugFrameCount,
+							debugPassName,
+							unit,
+							textureId,
+							GraphicsDebugImageAccessString(GL_WRITE_ONLY),
+							internalformat,
+							GraphicsDebugGetGlErrorString(bindError),
+							bindError
+						);
+						GraphicsDebugLogImageUnitState("after image bind (output)", unit);
+					}
+				}
+#endif
 				boundImageUnits[numBoundImageUnits] = unit;
 				boundImageAccess[numBoundImageUnits] = GL_WRITE_ONLY;
 				++numBoundImageUnits;
@@ -1149,6 +1326,22 @@ static bool GraphicsExecuteComputePassPipeline(
 	if (numGroupsZ == 0) numGroupsZ = 1;
 
 	glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+#if ENABLE_PIPELINE_DEBUG_LOG
+	{
+		GLenum dispatchError = glGetError();
+		if (dispatchError != GL_NO_ERROR || debugLog) {
+			GraphicsDebugPrint("[Pipeline Debug] editor frame %d compute pass \"%s\" glDispatchCompute(%u,%u,%u) error=%s(0x%04X)\n",
+				debugFrameCount,
+				debugPassName,
+				numGroupsX,
+				numGroupsY,
+				numGroupsZ,
+				GraphicsDebugGetGlErrorString(dispatchError),
+				dispatchError
+			);
+		}
+	}
+#endif
 
 	glMemoryBarrier(
 			GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
@@ -1160,6 +1353,7 @@ static bool GraphicsExecuteComputePassPipeline(
 	for (int index = 0; index < numBoundImageUnits; ++index) {
 		GLuint unit = boundImageUnits[index];
 		GLenum access = boundImageAccess[index];
+		GLenum unbindFormat = defaultPixelFormatInfo.internalformat != 0 ? defaultPixelFormatInfo.internalformat : GL_RGBA8;
 		glBindImageTexture(
 			unit,
 			0,
@@ -1167,8 +1361,24 @@ static bool GraphicsExecuteComputePassPipeline(
 			GL_FALSE,
 			0,
 			access,
-			defaultPixelFormatInfo.internalformat != 0 ? defaultPixelFormatInfo.internalformat : GL_RGBA8
+			unbindFormat
 		);
+#if ENABLE_PIPELINE_DEBUG_LOG
+		{
+			GLenum unbindError = glGetError();
+			if (unbindError != GL_NO_ERROR || debugLog) {
+				GraphicsDebugPrint("[Pipeline Debug] editor frame %d compute pass \"%s\" glBindImageTexture(unit=%d, tex=0, access=%s) error=%s(0x%04X)\n",
+					debugFrameCount,
+					debugPassName,
+					unit,
+					GraphicsDebugImageAccessString(access),
+					GraphicsDebugGetGlErrorString(unbindError),
+					unbindError
+				);
+				GraphicsDebugLogImageUnitState("after image unbind", (GLint)unit);
+			}
+		}
+#endif
 	}
 
 	/* Unbind textures */
@@ -1178,6 +1388,17 @@ static bool GraphicsExecuteComputePassPipeline(
 		glBindTexture(GL_TEXTURE_2D, 0);
 	}
 	glActiveTexture(GL_TEXTURE0);
+
+#if ENABLE_PIPELINE_DEBUG_LOG
+	int exitErrors = GraphicsDebugDrainGlErrors("compute pass (editor) EXIT");
+	if (exitErrors > 0) {
+		GraphicsDebugPrint("[Pipeline Debug] editor frame %d compute pass \"%s\" EXIT drained %d GL errors\n",
+			debugFrameCount,
+			debugPassName,
+			exitErrors
+		);
+	}
+#endif
 
 	return true;
 }
