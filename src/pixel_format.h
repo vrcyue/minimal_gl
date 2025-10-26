@@ -9,6 +9,7 @@ typedef enum {
 	PixelFormatUnorm8Rgba,
 	PixelFormatFp16Rgba,
 	PixelFormatFp32Rgba,
+	PixelFormatR32Ui,
 } PixelFormat;
 struct GlPixelFormatInfo {
 	GLenum internalformat;

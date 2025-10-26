@@ -4,9 +4,10 @@
 #include "pixel_format.h"
 
 static const GlPixelFormatInfo s_tblPixelFormatToGlPixelFormatInfo[] = {
-	/* PixelFormatUnorm8Rgba */	{GL_RGBA8,		GL_RGBA,	GL_UNSIGNED_BYTE,	32},
-	/* PixelFormatFp16Rgba */	{GL_RGBA16F,	GL_RGBA,	GL_HALF_FLOAT,		64},
-	/* PixelFormatFp32Rgba */	{GL_RGBA32F,	GL_RGBA,	GL_FLOAT,			128},
+	/* PixelFormatUnorm8Rgba */	{GL_RGBA8,		GL_RGBA,			GL_UNSIGNED_BYTE,	32},
+	/* PixelFormatFp16Rgba */	{GL_RGBA16F,	GL_RGBA,			GL_HALF_FLOAT,		64},
+	/* PixelFormatFp32Rgba */	{GL_RGBA32F,	GL_RGBA,			GL_FLOAT,			128},
+	/* PixelFormatR32Ui */		{GL_R32UI,		GL_RED_INTEGER,	GL_UNSIGNED_INT,	32},
 };
 
 GlPixelFormatInfo PixelFormatToGlPixelFormatInfo(

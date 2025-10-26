@@ -65,6 +65,7 @@ static const PipelinePixelFormatEntry s_pixelFormatTable[] = {
     {"unorm8_rgba", PixelFormatUnorm8Rgba},
     {"fp16_rgba",   PixelFormatFp16Rgba},
     {"fp32_rgba",   PixelFormatFp32Rgba},
+    {"r32ui",       PixelFormatR32Ui},
 };
 
 static const PipelineTextureFilterEntry s_textureFilterTable[] = {

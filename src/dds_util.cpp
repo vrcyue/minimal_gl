@@ -13,6 +13,7 @@ static const DxgiFormat s_tblPixelFormatToDxgiFormat[] = {
 	/* PixelFormatUnorm8Rgba */	DxgiFormat_R8G8B8A8Unorm,
 	/* PixelFormatFp16Rgba */	DxgiFormat_R16G16B16A16Float,
 	/* PixelFormatFp32Rgba */	DxgiFormat_R32G32B32A32Float,
+	/* PixelFormatR32Ui */		DxgiFormat_R32Uint,
 };
 DxgiFormat PixelFormatToDxgiFormat(
 	PixelFormat pixelFormat
