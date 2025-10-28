@@ -94,6 +94,7 @@ static RenderSettings s_renderSettings = {
 static PipelineDescription s_pipelineDescriptionForProject = {{0}};
 static bool s_pipelineDescriptionIsValid = false;
 static char s_pipelineLastFileName[MAX_PATH] = {0};
+static struct stat s_pipelineFileStat;
 static void AppPipelineSetLastFileNameInternal(const char *fileName);
 static bool AppPrepareShaderSource(
  const char *fileName,
@@ -154,6 +155,7 @@ static bool s_forceOverWrite = false;
 ▼	プロジェクトファイル関連
 -----------------------------------------------------------------------------*/
 static char s_projectFileName[MAX_PATH] = "";
+static struct stat s_projectFileStat;
 
 /*=============================================================================
 ▼	シェーダソースファイル関連
@@ -1793,6 +1795,9 @@ bool AppProjectImport(const char *fileName){
 
 		/* 現在のプロジェクトファイル名を保存 */
 		strcpy_s(s_projectFileName, sizeof(s_projectFileName), fileName);
+		if (stat(fileName, &s_projectFileStat) != 0) {
+			memset(&s_projectFileStat, 0, sizeof(s_projectFileStat));
+		}
 	} else {
 		AppErrorMessageBox(APP_NAME, "Failed to import project %s.", fileName);
 	}
@@ -1834,6 +1839,9 @@ bool AppProjectExport(const char *fileName){
 
 			strcpy_s(s_projectFileName, sizeof(s_projectFileName), fileName);
 			AppUpdateWindowTitleBar();
+			if (stat(fileName, &s_projectFileStat) != 0) {
+				memset(&s_projectFileStat, 0, sizeof(s_projectFileStat));
+			}
 		}
 	}
 
@@ -1887,6 +1895,9 @@ bool AppProjectAutoExport(bool confirm){
 			fputs(cJSON_Print(jsonRoot), file);
 			fclose(file);
 			result = true;
+			if (stat(s_projectFileName, &s_projectFileStat) != 0) {
+				memset(&s_projectFileStat, 0, sizeof(s_projectFileStat));
+			}
 		}
 	}
 
@@ -2128,8 +2139,9 @@ static void AppPipelineSetErrorMessage(
 }
 
 static void AppPipelineSetLastFileNameInternal(const char *fileName){
-	if (fileName == NULL) {
+	if (fileName == NULL || fileName[0] == '\0') {
 		s_pipelineLastFileName[0] = '\0';
+		memset(&s_pipelineFileStat, 0, sizeof(s_pipelineFileStat));
 		return;
 	}
 	strlcpy(s_pipelineLastFileName, fileName, sizeof(s_pipelineLastFileName));
@@ -2228,6 +2240,9 @@ bool AppPipelineLoadFromFile(
 	s_pipelineDescriptionForProject = pipeline;
 	s_pipelineDescriptionIsValid = true;
 	AppPipelineSetLastFileNameInternal(fileName);
+	if (stat(fileName, &s_pipelineFileStat) != 0) {
+		memset(&s_pipelineFileStat, 0, sizeof(s_pipelineFileStat));
+	}
 	GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject);
 	result = true;
 
@@ -2300,6 +2315,9 @@ bool AppPipelineSaveToFile(
 		fputs(jsonText, file);
 		fclose(file);
 		AppPipelineSetLastFileNameInternal(fileName);
+		if (stat(fileName, &s_pipelineFileStat) != 0) {
+			memset(&s_pipelineFileStat, 0, sizeof(s_pipelineFileStat));
+		}
 		result = true;
 	}
 
@@ -2642,6 +2660,33 @@ bool AppUpdate(){
 		}
 	}
 
+/* プロジェクトファイルの更新 */
+if (IsValidFileName(s_projectFileName)) {
+	if (IsFileUpdated(s_projectFileName, &s_projectFileStat)) {
+		printf("update the project file.\n");
+		AppProjectImport(s_projectFileName);
+	}
+}
+
+/* パイプラインファイルの更新 */
+const char *pipelineFileName = AppPipelineGetLastFileName();
+if (pipelineFileName != NULL
+&&	pipelineFileName[0] != '\0'
+&&	IsValidFileName(pipelineFileName)
+) {
+	if (IsFileUpdated(pipelineFileName, &s_pipelineFileStat)) {
+		printf("update the pipeline file.\n");
+		char errorMessage[512] = {0};
+		if (AppPipelineLoadFromFile(pipelineFileName, errorMessage, sizeof(errorMessage)) == false) {
+			if (errorMessage[0] != '\0') {
+				AppErrorMessageBox(APP_NAME, "%s", errorMessage);
+			} else {
+				AppErrorMessageBox(APP_NAME, "Failed to reload pipeline %s.", pipelineFileName);
+			}
+		}
+	}
+}
+
 /* サウンドシェーダの更新 */
 if (IsValidFileName(s_soundShaderFileName)) {
 	bool includeUpdated = AppHaveShaderIncludeDependenciesUpdated(s_soundShaderIncludeDependencies);
@@ -2770,6 +2815,8 @@ bool AppHelpAbout(
 ▼	初期化 & 終了処理
 -----------------------------------------------------------------------------*/
 bool AppInitialize(int argc, char **argv){
+	memset(&s_projectFileStat, 0, sizeof(s_projectFileStat));
+	memset(&s_pipelineFileStat, 0, sizeof(s_pipelineFileStat));
 	memset(&s_graphicsShaderFileStat, 0, sizeof(s_graphicsShaderFileStat));
 	memset(&s_computeShaderFileStat, 0, sizeof(s_computeShaderFileStat));
 	memset(&s_soundShaderFileStat, 0, sizeof(s_soundShaderFileStat));
