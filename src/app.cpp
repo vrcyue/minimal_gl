@@ -2492,6 +2492,7 @@ void AppClearAllRenderTargets(){
 
 void AppRestart(){
 	printf("restart.\n");
+	AppClearAllRenderTargets();
 	HighPrecisionTimerReset(0);
 	SoundRestartWaveOut();
 	s_paused = false;
