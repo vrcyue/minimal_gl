@@ -57,6 +57,14 @@ typedef enum {
 } PipelinePassType;
 
 typedef enum {
+	PipelinePresentChannelRgba,
+	PipelinePresentChannelR,
+	PipelinePresentChannelG,
+	PipelinePresentChannelB,
+	PipelinePresentChannelA,
+} PipelinePresentChannel;
+
+typedef enum {
 	PipelineResourceAccessSampled,
 	PipelineResourceAccessImageRead,
 	PipelineResourceAccessImageWrite,
@@ -110,6 +118,7 @@ typedef struct {
 	PipelinePassClear clear;
 	bool overrideWorkGroupSize;
 	GLuint workGroupSize[3];
+	PipelinePresentChannel presentChannel;
 } PipelinePass;
 
 typedef struct PipelineDescription {
@@ -789,11 +798,16 @@ static bool PipelineExecutePresentPass(
 ){
 	if (pipeline == NULL || pass == NULL) return false;
 	if (pass->numInputs <= 0) return false;
-	GLuint textureId = PipelineAcquireResourceTexture(pass->inputs[0].resourceIndex, frameCount, pass->inputs[0].historyOffset);
-	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[pass->inputs[0].resourceIndex];
+	int resourceIndex = pass->inputs[0].resourceIndex;
+	if (resourceIndex < 0 || resourceIndex >= pipeline->numResources) {
+		return false;
+	}
+	GLuint textureId = PipelineAcquireResourceTexture(resourceIndex, frameCount, pass->inputs[0].historyOffset);
+	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
 	if (textureId == 0 || state->initialized == false) {
 		return false;
 	}
+
 	GLuint readFramebuffer = 0;
 	glExtGenFramebuffers(1, &readFramebuffer);
 	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);

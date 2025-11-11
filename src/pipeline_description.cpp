@@ -11,6 +11,7 @@
 #include "external/cJSON/cJSON_Utils.h"
 #include <stdarg.h>
 #include <string.h>
+#include <ctype.h>
 
 typedef struct {
     const char *name;
@@ -41,6 +42,11 @@ typedef struct {
     const char *name;
     TextureWrap value;
 } PipelineTextureWrapEntry;
+
+typedef struct {
+    const char *name;
+    PipelinePresentChannel value;
+} PipelinePresentChannelEntry;
 
 static const PipelinePassTypeEntry s_passTypeTable[] = {
     {"fragment", PipelinePassTypeFragment},
@@ -77,6 +83,18 @@ static const PipelineTextureWrapEntry s_textureWrapTable[] = {
     {"repeat",          TextureWrapRepeat},
     {"clamp_to_edge",   TextureWrapClampToEdge},
     {"mirrored_repeat", TextureWrapMirroredRepeat},
+};
+
+static const PipelinePresentChannelEntry s_presentChannelTable[] = {
+    {"rgba", PipelinePresentChannelRgba},
+    {"rgb",  PipelinePresentChannelRgba},
+    {"color", PipelinePresentChannelRgba},
+    {"r",    PipelinePresentChannelR},
+    {"g",    PipelinePresentChannelG},
+    {"b",    PipelinePresentChannelB},
+    {"a",    PipelinePresentChannelA},
+    {"alpha", PipelinePresentChannelA},
+    {"w",    PipelinePresentChannelA},
 };
 
 static void SetErrorMessage(
@@ -135,6 +153,7 @@ static void InitPassDefaults(PipelinePass *pass){
     pass->workGroupSize[0] = 0;
     pass->workGroupSize[1] = 0;
     pass->workGroupSize[2] = 0;
+    pass->presentChannel = PipelinePresentChannelRgba;
 }
 
 static bool ParseStringField(
@@ -400,6 +419,39 @@ bool TextureWrapFromPipelineString(const char *value, TextureWrap *wrap){
 
 const char *TextureWrapToPipelineString(TextureWrap wrap){
     return LookupNameByTextureWrap(wrap);
+}
+
+static const char *LookupNameByPresentChannel(PipelinePresentChannel channel){
+    for (size_t index = 0; index < sizeof(s_presentChannelTable) / sizeof(s_presentChannelTable[0]); ++index) {
+        if (s_presentChannelTable[index].value == channel) {
+            return s_presentChannelTable[index].name;
+        }
+    }
+    return NULL;
+}
+
+bool PipelinePresentChannelFromString(const char *value, PipelinePresentChannel *channel){
+    if (value == NULL || channel == NULL) {
+        return false;
+    }
+    for (size_t index = 0; index < sizeof(s_presentChannelTable) / sizeof(s_presentChannelTable[0]); ++index) {
+        if (strcmp(value, s_presentChannelTable[index].name) == 0) {
+            *channel = s_presentChannelTable[index].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *PipelinePresentChannelToString(PipelinePresentChannel channel){
+    switch (channel) {
+        case PipelinePresentChannelRgba: return "rgba";
+        case PipelinePresentChannelR:    return "r";
+        case PipelinePresentChannelG:    return "g";
+        case PipelinePresentChannelB:    return "b";
+        case PipelinePresentChannelA:    return "a";
+        default:                         return NULL;
+    }
 }
 
 static bool DeserializeResource(
@@ -928,6 +980,36 @@ static bool DeserializePass(
         }
     }
 
+    if (pass->type == PipelinePassTypePresent) {
+        cJSON *jsonChannel = cJSON_GetObjectItemCaseSensitive(jsonPass, "presentChannel");
+        if (jsonChannel != NULL) {
+            if (cJSON_IsString(jsonChannel) == false || jsonChannel->valuestring == NULL) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"presentChannel\" must be a string in pass \"%s\".",
+                    pass->name
+                );
+                return false;
+            }
+            char buffer[32] = {0};
+            strlcpy(buffer, jsonChannel->valuestring, sizeof(buffer));
+            for (size_t index = 0; buffer[index] != '\0'; ++index) {
+                buffer[index] = (char)tolower((unsigned char)buffer[index]);
+            }
+            if (!PipelinePresentChannelFromString(buffer, &pass->presentChannel)) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "Unknown presentChannel \"%s\" in pass \"%s\".",
+                    jsonChannel->valuestring,
+                    pass->name
+                );
+                return false;
+            }
+        }
+    }
+
     description->numPasses++;
     return true;
 }
@@ -1252,6 +1334,12 @@ cJSON *PipelineDescriptionSerializeToJson(const PipelineDescription *description
         }
         if (pass->shaderPath[0] != '\0') {
             cJSON_AddStringToObject(jsonPass, "shader", pass->shaderPath);
+        }
+        if (pass->type == PipelinePassTypePresent && pass->presentChannel != PipelinePresentChannelRgba) {
+            const char *channelString = PipelinePresentChannelToString(pass->presentChannel);
+            if (channelString != NULL) {
+                cJSON_AddStringToObject(jsonPass, "presentChannel", channelString);
+            }
         }
 
         cJSON *jsonInputs = SerializeBindingsArray(description, pass->inputs, pass->numInputs);

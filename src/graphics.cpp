@@ -36,6 +36,10 @@ static int s_yReso = DEFAULT_SCREEN_YRESO;
 static PipelineDescription s_pipelineDescription = {{0}};
 static bool s_pipelineHasCustomDescription = false;
 static int s_activePipelinePassIndex = -1;
+static GLuint s_presentPipelineId = 0;
+static GLuint s_presentFragmentShaderId = 0;
+static GLint s_presentChannelUniformLocation = -1;
+static GLint s_presentInvResolutionUniformLocation = -1;
 
 typedef struct {
 	GLuint textureIds[PIPELINE_MAX_HISTORY_LENGTH];
@@ -106,6 +110,9 @@ static void GraphicsCreateComputeTextures(
 	const RenderSettings *settings
 );
 static void GraphicsDeleteComputeTextures(void);
+static bool GraphicsEnsurePresentPipeline(void);
+static void GraphicsDeletePresentPipeline(void);
+static GLint GraphicsPresentChannelToUniform(PipelinePresentChannel channel);
 static bool GraphicsExecuteComputePassPipeline(
 	const PipelineDescription *pipeline,
 	const PipelinePass *pass,
@@ -423,6 +430,51 @@ static bool GraphicsExecutePresentPassPipeline(
 	if (width <= 0) width = params->xReso;
 	if (height <= 0) height = params->yReso;
 
+	bool useDebugChannel = (pass->presentChannel != PipelinePresentChannelRgba);
+	if (useDebugChannel && !GraphicsEnsurePresentPipeline()) {
+		useDebugChannel = false;
+	}
+
+	if (useDebugChannel) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(0, 0, params->xReso, params->yReso);
+
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, textureId);
+		GraphicsSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+
+		glBindProgramPipeline(s_presentPipelineId);
+		glUseProgram(s_presentFragmentShaderId);
+		if (s_presentChannelUniformLocation >= 0) {
+			glUniform1i(
+				s_presentChannelUniformLocation,
+				GraphicsPresentChannelToUniform(pass->presentChannel)
+			);
+		}
+		if (s_presentInvResolutionUniformLocation >= 0) {
+			float invX = (params->xReso > 0) ? 1.0f / (float)params->xReso : 0.0f;
+			float invY = (params->yReso > 0) ? 1.0f / (float)params->yReso : 0.0f;
+			glUniform2f(s_presentInvResolutionUniformLocation, invX, invY);
+		}
+
+		GLfloat vertices[] = {
+			-1.0f, -1.0f,
+			 1.0f, -1.0f,
+			-1.0f,  1.0f,
+			 1.0f,  1.0f
+		};
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * (GLsizei)sizeof(GLfloat), vertices);
+		glEnableVertexAttribArray(0);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+		glDisableVertexAttribArray(0);
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glBindProgramPipeline(0);
+		glActiveTexture(GL_TEXTURE0);
+
+		return true;
+	}
+
 	GLuint readFbo = 0;
 	glGenFramebuffers(1, &readFbo);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
@@ -597,6 +649,7 @@ static void GraphicsBuildLegacyPipelineDescription(
 		memset(presentPass, 0, sizeof(*presentPass));
 		strlcpy(presentPass->name, "legacy_present", sizeof(presentPass->name));
 		presentPass->type = PipelinePassTypePresent;
+		presentPass->presentChannel = PipelinePresentChannelRgba;
 		if (mrtResourceIndices[0] >= 0) {
 			presentPass->inputs[presentPass->numInputs].resourceIndex = mrtResourceIndices[0];
 			presentPass->inputs[presentPass->numInputs].access = PipelineResourceAccessSampled;
@@ -1324,6 +1377,80 @@ static void GraphicsCreateComputeTextures(
 		/* GLenum target */		GL_TEXTURE_2D,
 		/* GLuint texture */	0	/* unbind */
 	);
+}
+
+static GLint GraphicsPresentChannelToUniform(PipelinePresentChannel channel){
+	switch (channel) {
+		case PipelinePresentChannelR:	return 1;
+		case PipelinePresentChannelG:	return 2;
+		case PipelinePresentChannelB:	return 3;
+		case PipelinePresentChannelA:	return 4;
+		case PipelinePresentChannelRgba:
+		default:						return 0;
+	}
+}
+
+static bool GraphicsEnsurePresentPipeline(void){
+	if (s_presentPipelineId != 0 && s_presentFragmentShaderId != 0) {
+		return true;
+	}
+
+	const char *fragmentSource =
+		"#version 330 core\n"
+		"layout(location = 0) out vec4 fragColor;\n"
+		"layout(binding = 0) uniform sampler2D uSource;\n"
+		"uniform int uChannelMode;\n"
+		"uniform vec2 uInvResolution;\n"
+		"void main() {\n"
+		"    vec2 uv = (gl_FragCoord.xy - vec2(0.5)) * uInvResolution;\n"
+		"    uv = clamp(uv, vec2(0.0), vec2(1.0));\n"
+		"    vec4 color = texture(uSource, uv);\n"
+		"    if (uChannelMode == 1) {\n"
+		"        fragColor = vec4(color.rrr, 1.0);\n"
+		"    } else if (uChannelMode == 2) {\n"
+		"        fragColor = vec4(color.ggg, 1.0);\n"
+		"    } else if (uChannelMode == 3) {\n"
+		"        fragColor = vec4(color.bbb, 1.0);\n"
+		"    } else if (uChannelMode == 4) {\n"
+		"        float a = color.a;\n"
+		"        fragColor = vec4(a, a, a, 1.0);\n"
+		"    } else {\n"
+		"        fragColor = color;\n"
+		"    }\n"
+		"}\n";
+
+	s_presentFragmentShaderId = CreateShader(GL_FRAGMENT_SHADER, 1, &fragmentSource);
+	if (s_presentFragmentShaderId == 0) {
+		return false;
+	}
+
+	glGenProgramPipelines(1, &s_presentPipelineId);
+	if (s_presentPipelineId == 0) {
+		glDeleteProgram(s_presentFragmentShaderId);
+		s_presentFragmentShaderId = 0;
+		return false;
+	}
+
+	glUseProgramStages(s_presentPipelineId, GL_VERTEX_SHADER_BIT, s_vertexShaderId);
+	glUseProgramStages(s_presentPipelineId, GL_FRAGMENT_SHADER_BIT, s_presentFragmentShaderId);
+
+	s_presentChannelUniformLocation = glGetUniformLocation(s_presentFragmentShaderId, "uChannelMode");
+	s_presentInvResolutionUniformLocation = glGetUniformLocation(s_presentFragmentShaderId, "uInvResolution");
+
+	return (s_presentChannelUniformLocation >= 0 && s_presentInvResolutionUniformLocation >= 0);
+}
+
+static void GraphicsDeletePresentPipeline(void){
+	if (s_presentPipelineId != 0) {
+		glDeleteProgramPipelines(1, &s_presentPipelineId);
+		s_presentPipelineId = 0;
+	}
+	if (s_presentFragmentShaderId != 0) {
+		glDeleteProgram(s_presentFragmentShaderId);
+		s_presentFragmentShaderId = 0;
+	}
+	s_presentChannelUniformLocation = -1;
+	s_presentInvResolutionUniformLocation = -1;
 }
 
 static void GraphicsDeleteFrameBuffer(
@@ -2826,12 +2953,15 @@ bool GraphicsInitialize(
  		GraphicsCreateVertexShader(shaderCode);
 	}
 
+	GraphicsEnsurePresentPipeline();
+
 	glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 	return true;
-}
+} 
 
 bool GraphicsTerminate(
 ){
+	GraphicsDeletePresentPipeline();
 	GraphicsDeleteComputeShader();	/* false が得られてもエラー扱いとしない */
 	GraphicsDeleteFragmentShader();	/* false が得られてもエラー扱いとしない */
 	GraphicsDeleteVertexShader();	/* false が得られてもエラー扱いとしない */

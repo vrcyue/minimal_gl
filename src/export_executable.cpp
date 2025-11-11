@@ -254,6 +254,19 @@ PipelineResourceAccessEnumName(PipelineResourceAccess access){
 	}
 }
 
+static const char *
+PipelinePresentChannelEnumName(PipelinePresentChannel channel){
+	switch (channel) {
+		case PipelinePresentChannelR:   return "PipelinePresentChannelR";
+		case PipelinePresentChannelG:   return "PipelinePresentChannelG";
+		case PipelinePresentChannelB:   return "PipelinePresentChannelB";
+		case PipelinePresentChannelA:   return "PipelinePresentChannelA";
+		case PipelinePresentChannelRgba:
+	default:
+		return "PipelinePresentChannelRgba";
+	}
+}
+
 static bool
 WritePipelineDescriptionInl(
 	const PipelineDescription *pipeline,
@@ -340,11 +353,12 @@ WritePipelineDescriptionInl(
 		);
 
 		fprintf(file, "\t\t\t/* overrideWorkGroupSize */ %s,\n", pass->overrideWorkGroupSize? "true" : "false");
-		fprintf(file, "\t\t\t/* workGroupSize */ { %u, %u, %u }\n",
+		fprintf(file, "\t\t\t/* workGroupSize */ { %u, %u, %u },\n",
 			(unsigned int)pass->workGroupSize[0],
 			(unsigned int)pass->workGroupSize[1],
 			(unsigned int)pass->workGroupSize[2]
 		);
+		fprintf(file, "\t\t\t/* presentChannel */ %s\n", PipelinePresentChannelEnumName(pass->presentChannel));
 		fprintf(file, "\t\t}%s\n", (passIndex + 1 < pipeline->numPasses)? "," : "");
 	}
 	fprintf(file, "\t},\n");

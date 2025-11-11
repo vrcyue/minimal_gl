@@ -35,6 +35,15 @@ typedef enum {
 } PipelinePassType;
 
 typedef enum {
+    PipelinePresentChannelRgba,
+    PipelinePresentChannelR,
+    PipelinePresentChannelG,
+    PipelinePresentChannelB,
+    PipelinePresentChannelA,
+    PipelinePresentChannelCount
+} PipelinePresentChannel;
+
+typedef enum {
     PipelineResourceAccessSampled,
     PipelineResourceAccessImageRead,
     PipelineResourceAccessImageWrite,
@@ -90,6 +99,7 @@ typedef struct {
     PipelinePassClear clear;
     bool overrideWorkGroupSize;
     GLuint workGroupSize[3];
+    PipelinePresentChannel presentChannel;
 } PipelinePass;
 
 typedef struct PipelineDescription {
