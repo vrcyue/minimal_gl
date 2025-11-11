@@ -102,6 +102,60 @@ MinimalGL を使った PC 4K Intro 作成の簡単な流れは以下のように
 5. **エクスポート**  
 	準備が整った状態で通常どおりエクスポートすると、`pipeline_description.inl` がサンプル構成で生成され、ランタイム実行ファイルでも同じパイプラインが適用されます。
 
+## Present パスのチャンネル表示切り替え
+
+MRT や Compute の途中結果を確認しやすいように、Present パスごとに描画チャネルを指定できます。`presentChannel` フィールドを追加して保存し、`File → Pipeline Management...` から `Load...` で読み込むだけで有効になります。
+
+```json
+{
+	"name": "present_debug",
+	"type": "present",
+	"inputs": [{ "resource": "composite", "access": "sampled" }],
+	"presentChannel": "a"
+}
+```
+
+- 省略時は既存どおり `rgba` でフルカラー表示されます。
+- `presentChannel` に指定できる値は `rgba` / `r` / `g` / `b` / `a`（一部 alias として `rgb`, `color`, `alpha`, `w` も可）です。
+- `r/g/b` を指定すると各チャンネルをグレースケールで拡大表示し、`a` はアルファ成分を白黒で描画します。プレイヤー実行ファイルでも同じ設定が反映されます。
+
+## SSBO リソース
+
+`type: "buffer"` を指定すると、Compute パス間で共有できる SSBO をパイプラインから管理できます。定義例:
+
+```json
+{
+	"id": "tile_particle_counts_ssbo",
+	"type": "buffer",
+	"resolution": { "mode": "framebuffer" },
+	"buffer": {
+		"sizing": "framebuffer_tiles",
+		"tileSize": { "width": 16, "height": 16 },
+		"elementStride": 4,
+		"elementsPerUnit": 1
+	}
+}
+```
+
+- `buffer.sizing` … `fixed` / `framebuffer_pixels` / `framebuffer_tiles`。`framebuffer_tiles` は `ceil(width/tileSize.x) * ceil(height/tileSize.y) * elementsPerUnit` で要素数を計算します。
+- `elementStride` … 1 要素あたりのバイト数（例: `uint` なら 4）。
+- `elementsPerUnit` … タイル（またはピクセル）1 つに何要素必要か。
+- `fixedElementCount` … `sizing: "fixed"` のときに必須。
+
+Compute パス側では `storage_read` / `storage_write` / `storage_read_write` を `access` として指定します。パス内で登場した順に `layout(binding = N)` の SSBO に割り当てられ、同じリソースが複数回登場した場合は同じ binding を共有します。
+
+### パーティクル用 SSBO 例
+
+| ID | 用途 | 設定例 |
+| --- | --- | --- |
+| `tile_particle_counts_ssbo` | タイルごとの粒子数カウント | `buffer.sizing: "framebuffer_tiles"`, `elementStride: 4` |
+| `tile_particle_offsets_ssbo` | prefix-sum 結果（開始オフセット） | 同上 |
+| `tile_particle_writeheads_ssbo` | fill パス用の書き込みカーソル | 同上（scan パスで 0 クリア、fill パスでは `storage_read_write`） |
+| `tile_particle_stats_ssbo` | `totalCount / tileOverflow / listOverflow` などの統計 | `buffer.sizing: "fixed"`, `fixedElementCount: 4`, `elementStride: 4` |
+
+`framebuffer_tiles` の解像度は現在の描画解像度を参照するため、エディタとエクスポート後の exe のどちらでも同じ SSBO サイズが自動で確保されます。
+
+
 # 機能一覧
 
 # 機能一覧

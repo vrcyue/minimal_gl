@@ -35,6 +35,19 @@ typedef enum {
 } PipelinePassType;
 
 typedef enum {
+    PipelineResourceTypeTexture,
+    PipelineResourceTypeBuffer,
+    PipelineResourceTypeCount
+} PipelineResourceType;
+
+typedef enum {
+    PipelineBufferSizingModeFixed,
+    PipelineBufferSizingModeFramebufferPixels,
+    PipelineBufferSizingModeFramebufferTiles,
+    PipelineBufferSizingModeCount
+} PipelineBufferSizingMode;
+
+typedef enum {
     PipelinePresentChannelRgba,
     PipelinePresentChannelR,
     PipelinePresentChannelG,
@@ -49,6 +62,9 @@ typedef enum {
     PipelineResourceAccessImageWrite,
     PipelineResourceAccessHistoryRead,
     PipelineResourceAccessColorAttachment,
+    PipelineResourceAccessStorageRead,
+    PipelineResourceAccessStorageWrite,
+    PipelineResourceAccessStorageReadWrite,
     PipelineResourceAccessCount
 } PipelineResourceAccess;
 
@@ -65,13 +81,23 @@ typedef struct {
 } PipelineResourceResolution;
 
 typedef struct {
+    PipelineBufferSizingMode sizingMode;
+    int fixedElementCount;
+    int elementStrideInBytes;
+    int elementsPerUnit;
+    int tileSize[2];
+} PipelineResourceBuffer;
+
+typedef struct {
     char id[PIPELINE_MAX_RESOURCE_ID_LENGTH];
+    PipelineResourceType type;
     PixelFormat pixelFormat;
     PipelineResourceResolution resolution;
     int historyLength;
     TextureFilter textureFilter;
     TextureWrap textureWrap;
     GLuint glTextureIds[PIPELINE_MAX_HISTORY_LENGTH];
+    PipelineResourceBuffer buffer;
 } PipelineResource;
 
 typedef struct {
@@ -126,6 +152,9 @@ cJSON *PipelineDescriptionSerializeToJson(
 const char *PipelinePassTypeToString(PipelinePassType type);
 bool PipelinePassTypeFromString(const char *value, PipelinePassType *type);
 
+const char *PipelineResourceTypeToString(PipelineResourceType type);
+bool PipelineResourceTypeFromString(const char *value, PipelineResourceType *type);
+
 const char *PipelineResourceAccessToString(PipelineResourceAccess access);
 bool PipelineResourceAccessFromString(const char *value, PipelineResourceAccess *access);
 
@@ -140,6 +169,9 @@ bool TextureFilterFromPipelineString(const char *value, TextureFilter *filter);
 
 const char *TextureWrapToPipelineString(TextureWrap wrap);
 bool TextureWrapFromPipelineString(const char *value, TextureWrap *wrap);
+
+const char *PipelineBufferSizingModeToString(PipelineBufferSizingMode mode);
+bool PipelineBufferSizingModeFromString(const char *value, PipelineBufferSizingMode *mode);
 
 #ifdef __cplusplus
 }

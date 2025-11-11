@@ -20,6 +20,11 @@ typedef struct {
 
 typedef struct {
     const char *name;
+    PipelineResourceType value;
+} PipelineResourceTypeEntry;
+
+typedef struct {
+    const char *name;
     PipelineResourceAccess value;
 } PipelineResourceAccessEntry;
 
@@ -27,6 +32,11 @@ typedef struct {
     const char *name;
     PipelineResolutionMode value;
 } PipelineResolutionModeEntry;
+
+typedef struct {
+    const char *name;
+    PipelineBufferSizingMode value;
+} PipelineBufferSizingModeEntry;
 
 typedef struct {
     const char *name;
@@ -54,17 +64,32 @@ static const PipelinePassTypeEntry s_passTypeTable[] = {
     {"present",  PipelinePassTypePresent},
 };
 
+static const PipelineResourceTypeEntry s_resourceTypeTable[] = {
+    {"texture", PipelineResourceTypeTexture},
+    {"buffer",  PipelineResourceTypeBuffer},
+    {"ssbo",    PipelineResourceTypeBuffer},
+};
+
 static const PipelineResourceAccessEntry s_resourceAccessTable[] = {
     {"sampled",        PipelineResourceAccessSampled},
     {"image_read",     PipelineResourceAccessImageRead},
     {"image_write",    PipelineResourceAccessImageWrite},
     {"history_read",   PipelineResourceAccessHistoryRead},
     {"color_attachment", PipelineResourceAccessColorAttachment},
+    {"storage_read",   PipelineResourceAccessStorageRead},
+    {"storage_write",  PipelineResourceAccessStorageWrite},
+    {"storage_read_write", PipelineResourceAccessStorageReadWrite},
 };
 
 static const PipelineResolutionModeEntry s_resolutionModeTable[] = {
     {"framebuffer", PipelineResolutionModeFramebuffer},
     {"fixed",       PipelineResolutionModeFixed},
+};
+
+static const PipelineBufferSizingModeEntry s_bufferSizingTable[] = {
+    {"fixed",              PipelineBufferSizingModeFixed},
+    {"framebuffer_pixels", PipelineBufferSizingModeFramebufferPixels},
+    {"framebuffer_tiles",  PipelineBufferSizingModeFramebufferTiles},
 };
 
 static const PipelinePixelFormatEntry s_pixelFormatTable[] = {
@@ -135,11 +160,18 @@ static int FindResourceIndexById(
 
 static void InitResourceDefaults(PipelineResource *resource){
     memset(resource, 0, sizeof(*resource));
+    resource->type = PipelineResourceTypeTexture;
     resource->pixelFormat = DEFAULT_PIXEL_FORMAT;
     resource->resolution.mode = PipelineResolutionModeFramebuffer;
     resource->historyLength = 1;
     resource->textureFilter = DEFAULT_TEXTURE_FILTER;
     resource->textureWrap = DEFAULT_TEXTURE_WRAP;
+    resource->buffer.sizingMode = PipelineBufferSizingModeFixed;
+    resource->buffer.fixedElementCount = 1;
+    resource->buffer.elementStrideInBytes = 4;
+    resource->buffer.elementsPerUnit = 1;
+    resource->buffer.tileSize[0] = 16;
+    resource->buffer.tileSize[1] = 16;
 }
 
 static void InitPassDefaults(PipelinePass *pass){
@@ -304,6 +336,24 @@ static const char *LookupNameByTextureWrap(TextureWrap wrap){
     return NULL;
 }
 
+static const char *LookupNameByResourceType(PipelineResourceType type){
+    for (size_t index = 0; index < sizeof(s_resourceTypeTable) / sizeof(s_resourceTypeTable[0]); ++index) {
+        if (s_resourceTypeTable[index].value == type) {
+            return s_resourceTypeTable[index].name;
+        }
+    }
+    return NULL;
+}
+
+static const char *LookupNameByBufferSizingMode(PipelineBufferSizingMode mode){
+    for (size_t index = 0; index < sizeof(s_bufferSizingTable) / sizeof(s_bufferSizingTable[0]); ++index) {
+        if (s_bufferSizingTable[index].value == mode) {
+            return s_bufferSizingTable[index].name;
+        }
+    }
+    return NULL;
+}
+
 void PipelineDescriptionInit(PipelineDescription *description){
     if (description == NULL) {
         return;
@@ -334,6 +384,23 @@ bool PipelinePassTypeFromString(const char *value, PipelinePassType *type){
 
 const char *PipelinePassTypeToString(PipelinePassType type){
     return LookupNameByPassType(type);
+}
+
+bool PipelineResourceTypeFromString(const char *value, PipelineResourceType *type){
+    if (value == NULL || type == NULL) {
+        return false;
+    }
+    for (size_t index = 0; index < sizeof(s_resourceTypeTable) / sizeof(s_resourceTypeTable[0]); ++index) {
+        if (strcmp(value, s_resourceTypeTable[index].name) == 0) {
+            *type = s_resourceTypeTable[index].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *PipelineResourceTypeToString(PipelineResourceType type){
+    return LookupNameByResourceType(type);
 }
 
 bool PipelineResourceAccessFromString(const char *value, PipelineResourceAccess *access){
@@ -421,6 +488,23 @@ const char *TextureWrapToPipelineString(TextureWrap wrap){
     return LookupNameByTextureWrap(wrap);
 }
 
+bool PipelineBufferSizingModeFromString(const char *value, PipelineBufferSizingMode *mode){
+    if (value == NULL || mode == NULL) {
+        return false;
+    }
+    for (size_t index = 0; index < sizeof(s_bufferSizingTable) / sizeof(s_bufferSizingTable[0]); ++index) {
+        if (strcmp(value, s_bufferSizingTable[index].name) == 0) {
+            *mode = s_bufferSizingTable[index].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *PipelineBufferSizingModeToString(PipelineBufferSizingMode mode){
+    return LookupNameByBufferSizingMode(mode);
+}
+
 static const char *LookupNameByPresentChannel(PipelinePresentChannel channel){
     for (size_t index = 0; index < sizeof(s_presentChannelTable) / sizeof(s_presentChannelTable[0]); ++index) {
         if (s_presentChannelTable[index].value == channel) {
@@ -486,26 +570,56 @@ static bool DeserializeResource(
         return false;
     }
 
-    cJSON *jsonPixelFormat = cJSON_GetObjectItemCaseSensitive(jsonResource, "pixelFormat");
-    if (jsonPixelFormat != NULL) {
-        if (cJSON_IsString(jsonPixelFormat) == false || jsonPixelFormat->valuestring == NULL) {
+    char typeString[32] = "texture";
+    cJSON *jsonType = cJSON_GetObjectItemCaseSensitive(jsonResource, "type");
+    if (jsonType != NULL) {
+        if (cJSON_IsString(jsonType) == false || jsonType->valuestring == NULL) {
             SetErrorMessage(
                 errorMessage,
                 errorMessageSizeInBytes,
-                "\"pixelFormat\" must be a string in resource \"%s\".",
+                "\"type\" must be a string in resource \"%s\".",
                 resource->id
             );
             return false;
         }
-        if (!PixelFormatFromPipelineString(jsonPixelFormat->valuestring, &resource->pixelFormat)) {
-            SetErrorMessage(
-                errorMessage,
-                errorMessageSizeInBytes,
-                "Unknown pixel format \"%s\" in resource \"%s\".",
-                jsonPixelFormat->valuestring,
-                resource->id
-            );
-            return false;
+        strlcpy(typeString, jsonType->valuestring, sizeof(typeString));
+    }
+    for (size_t index = 0; typeString[index] != '\0'; ++index) {
+        typeString[index] = (char)tolower((unsigned char)typeString[index]);
+    }
+    if (!PipelineResourceTypeFromString(typeString, &resource->type)) {
+        SetErrorMessage(
+            errorMessage,
+            errorMessageSizeInBytes,
+            "Unknown resource type \"%s\" in resource \"%s\".",
+            typeString,
+            resource->id
+        );
+        return false;
+    }
+
+    if (resource->type == PipelineResourceTypeTexture) {
+        cJSON *jsonPixelFormat = cJSON_GetObjectItemCaseSensitive(jsonResource, "pixelFormat");
+        if (jsonPixelFormat != NULL) {
+            if (cJSON_IsString(jsonPixelFormat) == false || jsonPixelFormat->valuestring == NULL) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"pixelFormat\" must be a string in resource \"%s\".",
+                    resource->id
+                );
+                return false;
+            }
+            if (!PixelFormatFromPipelineString(jsonPixelFormat->valuestring, &resource->pixelFormat)) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "Unknown pixel format \"%s\" in resource \"%s\".",
+                    jsonPixelFormat->valuestring,
+                    resource->id
+                );
+                return false;
+            }
         }
     }
 
@@ -571,6 +685,15 @@ static bool DeserializeResource(
 
     cJSON *jsonHistoryLength = cJSON_GetObjectItemCaseSensitive(jsonResource, "historyLength");
     if (jsonHistoryLength != NULL) {
+        if (resource->type != PipelineResourceTypeTexture) {
+            SetErrorMessage(
+                errorMessage,
+                errorMessageSizeInBytes,
+                "\"historyLength\" is only valid for texture resources (resource \"%s\").",
+                resource->id
+            );
+            return false;
+        }
         if (cJSON_IsNumber(jsonHistoryLength) == false) {
             SetErrorMessage(
                 errorMessage,
@@ -596,6 +719,15 @@ static bool DeserializeResource(
 
     cJSON *jsonSampler = cJSON_GetObjectItemCaseSensitive(jsonResource, "sampler");
     if (jsonSampler != NULL) {
+        if (resource->type != PipelineResourceTypeTexture) {
+            SetErrorMessage(
+                errorMessage,
+                errorMessageSizeInBytes,
+                "\"sampler\" node is only valid for texture resources (resource \"%s\").",
+                resource->id
+            );
+            return false;
+        }
         if (cJSON_IsObject(jsonSampler) == false) {
             SetErrorMessage(
                 errorMessage,
@@ -648,6 +780,171 @@ static bool DeserializeResource(
                 );
                 return false;
             }
+        }
+    }
+
+    if (resource->type == PipelineResourceTypeBuffer) {
+        resource->historyLength = 1;
+        cJSON *jsonBuffer = cJSON_GetObjectItemCaseSensitive(jsonResource, "buffer");
+        if (jsonBuffer == NULL || cJSON_IsObject(jsonBuffer) == false) {
+            SetErrorMessage(
+                errorMessage,
+                errorMessageSizeInBytes,
+                "Buffer resource \"%s\" must define a \"buffer\" object.",
+                resource->id
+            );
+            return false;
+        }
+
+        cJSON *jsonSizing = cJSON_GetObjectItemCaseSensitive(jsonBuffer, "sizing");
+        if (jsonSizing != NULL) {
+            if (cJSON_IsString(jsonSizing) == false || jsonSizing->valuestring == NULL) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"buffer.sizing\" must be a string in resource \"%s\".",
+                    resource->id
+                );
+                return false;
+            }
+            char sizingString[32] = {0};
+            strlcpy(sizingString, jsonSizing->valuestring, sizeof(sizingString));
+            for (size_t index = 0; sizingString[index] != '\0'; ++index) {
+                sizingString[index] = (char)tolower((unsigned char)sizingString[index]);
+            }
+            if (!PipelineBufferSizingModeFromString(sizingString, &resource->buffer.sizingMode)) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "Unknown buffer sizing mode \"%s\" in resource \"%s\".",
+                    sizingString,
+                    resource->id
+                );
+                return false;
+            }
+        }
+
+        cJSON *jsonStride = cJSON_GetObjectItemCaseSensitive(jsonBuffer, "elementStride");
+        if (jsonStride != NULL) {
+            if (cJSON_IsNumber(jsonStride) == false) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"buffer.elementStride\" must be a positive integer in resource \"%s\".",
+                    resource->id
+                );
+                return false;
+            }
+            int stride = (int)cJSON_GetNumberValue(jsonStride);
+            if (stride <= 0) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"buffer.elementStride\" must be > 0 in resource \"%s\".",
+                    resource->id
+                );
+                return false;
+            }
+            resource->buffer.elementStrideInBytes = stride;
+        }
+
+        cJSON *jsonElementsPerUnit = cJSON_GetObjectItemCaseSensitive(jsonBuffer, "elementsPerUnit");
+        if (jsonElementsPerUnit == NULL) {
+            jsonElementsPerUnit = cJSON_GetObjectItemCaseSensitive(jsonBuffer, "elementsPerTile");
+        }
+        if (jsonElementsPerUnit != NULL) {
+            if (cJSON_IsNumber(jsonElementsPerUnit) == false) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"buffer.elementsPerUnit\" must be a positive integer in resource \"%s\".",
+                    resource->id
+                );
+                return false;
+            }
+            int elementsPerUnit = (int)cJSON_GetNumberValue(jsonElementsPerUnit);
+            if (elementsPerUnit <= 0) {
+                SetErrorMessage(
+                    errorMessage,
+                    errorMessageSizeInBytes,
+                    "\"buffer.elementsPerUnit\" must be > 0 in resource \"%s\".",
+                    resource->id
+                );
+                return false;
+            }
+            resource->buffer.elementsPerUnit = elementsPerUnit;
+        }
+
+        switch (resource->buffer.sizingMode) {
+            case PipelineBufferSizingModeFixed: {
+                cJSON *jsonFixed = cJSON_GetObjectItemCaseSensitive(jsonBuffer, "fixedElementCount");
+                if (jsonFixed == NULL || cJSON_IsNumber(jsonFixed) == false) {
+                    SetErrorMessage(
+                        errorMessage,
+                        errorMessageSizeInBytes,
+                        "\"buffer.fixedElementCount\" must be specified for resource \"%s\".",
+                        resource->id
+                    );
+                    return false;
+                }
+                int fixedCount = (int)cJSON_GetNumberValue(jsonFixed);
+                if (fixedCount <= 0) {
+                    SetErrorMessage(
+                        errorMessage,
+                        errorMessageSizeInBytes,
+                        "\"buffer.fixedElementCount\" must be > 0 in resource \"%s\".",
+                        resource->id
+                    );
+                    return false;
+                }
+                resource->buffer.fixedElementCount = fixedCount;
+            } break;
+            case PipelineBufferSizingModeFramebufferTiles: {
+                cJSON *jsonTileSize = cJSON_GetObjectItemCaseSensitive(jsonBuffer, "tileSize");
+                if (jsonTileSize != NULL) {
+                    if (cJSON_IsObject(jsonTileSize) == false) {
+                        SetErrorMessage(
+                            errorMessage,
+                            errorMessageSizeInBytes,
+                            "\"buffer.tileSize\" must be an object with \"width\"/\"height\" in resource \"%s\".",
+                            resource->id
+                        );
+                        return false;
+                    }
+                    cJSON *jsonTileWidth = cJSON_GetObjectItemCaseSensitive(jsonTileSize, "width");
+                    if (jsonTileWidth == NULL) {
+                        jsonTileWidth = cJSON_GetObjectItemCaseSensitive(jsonTileSize, "x");
+                    }
+                    cJSON *jsonTileHeight = cJSON_GetObjectItemCaseSensitive(jsonTileSize, "height");
+                    if (jsonTileHeight == NULL) {
+                        jsonTileHeight = cJSON_GetObjectItemCaseSensitive(jsonTileSize, "y");
+                    }
+                    if (jsonTileWidth == NULL || cJSON_IsNumber(jsonTileWidth) == false
+                    || jsonTileHeight == NULL || cJSON_IsNumber(jsonTileHeight) == false) {
+                        SetErrorMessage(
+                            errorMessage,
+                            errorMessageSizeInBytes,
+                            "\"buffer.tileSize\" must contain numeric \"width\" and \"height\" for resource \"%s\".",
+                            resource->id
+                        );
+                        return false;
+                    }
+                    resource->buffer.tileSize[0] = (int)cJSON_GetNumberValue(jsonTileWidth);
+                    resource->buffer.tileSize[1] = (int)cJSON_GetNumberValue(jsonTileHeight);
+                }
+                if (resource->buffer.tileSize[0] <= 0 || resource->buffer.tileSize[1] <= 0) {
+                    SetErrorMessage(
+                        errorMessage,
+                        errorMessageSizeInBytes,
+                        "\"buffer.tileSize\" must be positive for resource \"%s\".",
+                        resource->id
+                    );
+                    return false;
+                }
+            } break;
+            case PipelineBufferSizingModeFramebufferPixels:
+            default:
+                break;
         }
     }
 
@@ -1297,18 +1594,58 @@ cJSON *PipelineDescriptionSerializeToJson(const PipelineDescription *description
         }
         cJSON_AddItemToArray(jsonResources, jsonResource);
         cJSON_AddStringToObject(jsonResource, "id", resource->id);
-        const char *pixelFormatString = PixelFormatToPipelineString(resource->pixelFormat);
-        if (pixelFormatString != NULL) {
-            cJSON_AddStringToObject(jsonResource, "pixelFormat", pixelFormatString);
+        if (resource->type != PipelineResourceTypeTexture) {
+            const char *resourceTypeString = PipelineResourceTypeToString(resource->type);
+            if (resourceTypeString != NULL) {
+                cJSON_AddStringToObject(jsonResource, "type", resourceTypeString);
+            }
+        }
+        if (resource->type == PipelineResourceTypeTexture) {
+            const char *pixelFormatString = PixelFormatToPipelineString(resource->pixelFormat);
+            if (pixelFormatString != NULL) {
+                cJSON_AddStringToObject(jsonResource, "pixelFormat", pixelFormatString);
+            }
         }
         cJSON *jsonResolution = SerializeResolution(resource);
         if (jsonResolution != NULL) {
             cJSON_AddItemToObject(jsonResource, "resolution", jsonResolution);
         }
-        cJSON_AddNumberToObject(jsonResource, "historyLength", resource->historyLength);
-        cJSON *jsonSampler = SerializeSampler(resource);
-        if (jsonSampler != NULL) {
-            cJSON_AddItemToObject(jsonResource, "sampler", jsonSampler);
+        if (resource->type == PipelineResourceTypeTexture) {
+            cJSON_AddNumberToObject(jsonResource, "historyLength", resource->historyLength);
+            cJSON *jsonSampler = SerializeSampler(resource);
+            if (jsonSampler != NULL) {
+                cJSON_AddItemToObject(jsonResource, "sampler", jsonSampler);
+            }
+        } else if (resource->type == PipelineResourceTypeBuffer) {
+            cJSON *jsonBuffer = cJSON_CreateObject();
+            if (jsonBuffer != NULL) {
+                cJSON_AddItemToObject(jsonResource, "buffer", jsonBuffer);
+                const char *sizingString = PipelineBufferSizingModeToString(resource->buffer.sizingMode);
+                if (sizingString != NULL) {
+                    cJSON_AddStringToObject(jsonBuffer, "sizing", sizingString);
+                }
+                cJSON_AddNumberToObject(jsonBuffer, "elementStride", resource->buffer.elementStrideInBytes);
+                if (resource->buffer.elementsPerUnit != 1) {
+                    cJSON_AddNumberToObject(jsonBuffer, "elementsPerUnit", resource->buffer.elementsPerUnit);
+                }
+                switch (resource->buffer.sizingMode) {
+                    case PipelineBufferSizingModeFixed:
+                        cJSON_AddNumberToObject(jsonBuffer, "fixedElementCount", resource->buffer.fixedElementCount);
+                        break;
+                    case PipelineBufferSizingModeFramebufferTiles: {
+                        cJSON *jsonTileSize = cJSON_CreateObject();
+                        if (jsonTileSize != NULL) {
+                            cJSON_AddNumberToObject(jsonTileSize, "width", resource->buffer.tileSize[0]);
+                            cJSON_AddNumberToObject(jsonTileSize, "height", resource->buffer.tileSize[1]);
+                            cJSON_AddItemToObject(jsonBuffer, "tileSize", jsonTileSize);
+                        }
+                        break;
+                    }
+                    case PipelineBufferSizingModeFramebufferPixels:
+                    default:
+                        break;
+                }
+            }
         }
     }
 

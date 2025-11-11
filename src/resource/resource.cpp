@@ -57,6 +57,10 @@ char g_concatenatedString_align0[] =
 	"glMapBuffer\0"					/* Buffer が既出ワード */
 	"glDrawBuffers\0"				/* Buffer が既出ワード */
 	"glBindBufferBase\0"			/* Buffer が既出ワード */
+	"glBindBuffer\0"
+	"glBufferData\0"
+	"glGenBuffers\0"
+	"glDeleteBuffers\0"
 	"glBindFramebuffer\0"			/* Bind と Buffer の uffer が既出ワード */
 	"glGenFramebuffers\0"			/* Framebuffer が既出ワード */
 	"glDeleteFramebuffers\0"		/* Framebuffer が既出ワード */
@@ -112,6 +116,10 @@ typedef enum {
 	GlExtMapBuffer,
 	GlExtDrawBuffers,
 	GlExtBindBufferBase,
+	GlExtBindBuffer,
+	GlExtBufferData,
+	GlExtGenBuffers,
+	GlExtDeleteBuffers,
 	GlExtBindFramebuffer,
 	GlExtGenFramebuffers,
 	GlExtDeleteFramebuffers,
@@ -155,6 +163,10 @@ typedef enum {
 #define glExtMapBuffer				((PFNGLMAPBUFFERPROC)	        s_glExtFunctions[GlExtMapBuffer])
 #define glExtDrawBuffers			((PFNGLDRAWBUFFERSPROC)         s_glExtFunctions[GlExtDrawBuffers])
 #define glExtBindBufferBase			((PFNGLBINDBUFFERBASEPROC)      s_glExtFunctions[GlExtBindBufferBase])
+#define glExtBindBuffer				((PFNGLBINDBUFFERPROC)          s_glExtFunctions[GlExtBindBuffer])
+#define glExtBufferData				((PFNGLBUFFERDATAPROC)          s_glExtFunctions[GlExtBufferData])
+#define glExtGenBuffers				((PFNGLGENBUFFERSPROC)          s_glExtFunctions[GlExtGenBuffers])
+#define glExtDeleteBuffers			((PFNGLDELETEBUFFERSPROC)       s_glExtFunctions[GlExtDeleteBuffers])
 #define glExtBindFramebuffer		((PFNGLBINDFRAMEBUFFERPROC)     s_glExtFunctions[GlExtBindFramebuffer])
 #define glExtGenFramebuffers		((PFNGLGENFRAMEBUFFERSPROC)     s_glExtFunctions[GlExtGenFramebuffers])
 #define glExtDeleteFramebuffers		((PFNGLDELETEFRAMEBUFFERSPROC)  s_glExtFunctions[GlExtDeleteFramebuffers])

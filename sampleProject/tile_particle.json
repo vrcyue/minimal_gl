@@ -1,0 +1,146 @@
+{
+	"resources":	[{
+			"id":	"compute_output",
+			"pixelFormat":	"fp16_rgba",
+			"resolution":	{
+				"mode":	"framebuffer"
+			},
+			"historyLength":	3,
+			"sampler":	{
+				"filter":	"linear",
+				"wrap":	"clamp_to_edge"
+			}
+		}, {
+			"id":	"final_color",
+			"pixelFormat":	"fp16_rgba",
+			"resolution":	{
+				"mode":	"framebuffer"
+			},
+			"historyLength":	1,
+			"sampler":	{
+				"filter":	"linear",
+				"wrap":	"clamp_to_edge"
+			}
+		}, {
+			"id":	"tile_particle_counts_ssbo",
+			"type":	"buffer",
+			"resolution":	{
+				"mode":	"framebuffer"
+			},
+			"buffer":	{
+				"sizing":	"framebuffer_tiles",
+				"elementStride":	4,
+				"tileSize":	{
+					"width":	16,
+					"height":	16
+				}
+			}
+		}, {
+			"id":	"tile_particle_offsets_ssbo",
+			"type":	"buffer",
+			"resolution":	{
+				"mode":	"framebuffer"
+			},
+			"buffer":	{
+				"sizing":	"framebuffer_tiles",
+				"elementStride":	4,
+				"tileSize":	{
+					"width":	16,
+					"height":	16
+				}
+			}
+		}, {
+			"id":	"tile_particle_writeheads_ssbo",
+			"type":	"buffer",
+			"resolution":	{
+				"mode":	"framebuffer"
+			},
+			"buffer":	{
+				"sizing":	"framebuffer_tiles",
+				"elementStride":	4,
+				"tileSize":	{
+					"width":	16,
+					"height":	16
+				}
+			}
+		}, {
+			"id":	"tile_particle_stats_ssbo",
+			"type":	"buffer",
+			"resolution":	{
+				"mode":	"framebuffer"
+			},
+			"buffer":	{
+				"sizing":	"fixed",
+				"elementStride":	4,
+				"fixedElementCount":	4
+			}
+		}],
+	"passes":	[{
+			"name":	"ssbo_clear",
+			"type":	"compute",
+			"shader":	"pipeline_compute.glsl",
+			"outputs":	[{
+					"resource":	"tile_particle_counts_ssbo",
+					"usage":	"storage_write"
+				}, {
+					"resource":	"tile_particle_offsets_ssbo",
+					"usage":	"storage_write"
+				}, {
+					"resource":	"tile_particle_writeheads_ssbo",
+					"usage":	"storage_write"
+				}, {
+					"resource":	"tile_particle_stats_ssbo",
+					"usage":	"storage_write"
+				}],
+			"workGroupSize":	[8, 8, 1]
+		}, {
+			"name":	"compute_test",
+			"type":	"compute",
+			"shader":	"pipeline_compute.glsl",
+			"inputs":	[{
+					"resource":	"compute_output",
+					"usage":	"history_read",
+					"historyOffset":	-1
+				}],
+			"outputs":	[{
+					"resource":	"compute_output",
+					"usage":	"image_write"
+				}, {
+					"resource":	"tile_particle_counts_ssbo",
+					"usage":	"storage_read_write"
+				}, {
+					"resource":	"tile_particle_offsets_ssbo",
+					"usage":	"storage_read_write"
+				}, {
+					"resource":	"tile_particle_writeheads_ssbo",
+					"usage":	"storage_read_write"
+				}, {
+					"resource":	"tile_particle_stats_ssbo",
+					"usage":	"storage_read_write"
+				}],
+			"workGroupSize":	[8, 8, 1]
+		}, {
+			"name":	"blit",
+			"type":	"fragment",
+			"shader":	"pipeline_graphics.glsl",
+			"inputs":	[{
+					"resource":	"compute_output",
+					"usage":	"sampled"
+				}],
+			"outputs":	[{
+					"resource":	"final_color",
+					"usage":	"color_attachment"
+				}],
+			"clear":	{
+				"color":	[0, 0, 0, 1],
+				"depth":	1
+			}
+		}, {
+			"name":	"present",
+			"type":	"present",
+			"inputs":	[{
+					"resource":	"final_color",
+					"usage":	"sampled"
+				}]
+		}]
+}

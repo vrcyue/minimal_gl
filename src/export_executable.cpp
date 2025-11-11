@@ -243,6 +243,15 @@ PipelinePassTypeEnumName(PipelinePassType type){
 }
 
 static const char *
+PipelineResourceTypeEnumName(PipelineResourceType type){
+	switch (type) {
+		case PipelineResourceTypeTexture:	return "PipelineResourceTypeTexture";
+		case PipelineResourceTypeBuffer:	return "PipelineResourceTypeBuffer";
+		default:							return "PipelineResourceTypeTexture";
+	}
+}
+
+static const char *
 PipelineResourceAccessEnumName(PipelineResourceAccess access){
 	switch (access) {
 		case PipelineResourceAccessSampled:			return "PipelineResourceAccessSampled";
@@ -250,7 +259,20 @@ PipelineResourceAccessEnumName(PipelineResourceAccess access){
 		case PipelineResourceAccessImageWrite:		return "PipelineResourceAccessImageWrite";
 		case PipelineResourceAccessHistoryRead:		return "PipelineResourceAccessHistoryRead";
 		case PipelineResourceAccessColorAttachment:	return "PipelineResourceAccessColorAttachment";
+		case PipelineResourceAccessStorageRead:		return "PipelineResourceAccessStorageRead";
+		case PipelineResourceAccessStorageWrite:		return "PipelineResourceAccessStorageWrite";
+		case PipelineResourceAccessStorageReadWrite:return "PipelineResourceAccessStorageReadWrite";
 		default:									return "PipelineResourceAccessSampled";
+	}
+}
+
+static const char *
+PipelineBufferSizingModeEnumName(PipelineBufferSizingMode mode){
+	switch (mode) {
+		case PipelineBufferSizingModeFixed:				return "PipelineBufferSizingModeFixed";
+		case PipelineBufferSizingModeFramebufferPixels:return "PipelineBufferSizingModeFramebufferPixels";
+		case PipelineBufferSizingModeFramebufferTiles:	return "PipelineBufferSizingModeFramebufferTiles";
+		default:										return "PipelineBufferSizingModeFixed";
 	}
 }
 
@@ -288,6 +310,7 @@ WritePipelineDescriptionInl(
 		fprintf(file, "\t\t\t/* id */ ");
 		WriteEscapedString(file, resource->id);
 		fprintf(file, ",\n");
+		fprintf(file, "\t\t\t/* type */ %s,\n", PipelineResourceTypeEnumName(resource->type));
 		fprintf(file, "\t\t\t/* pixelFormat */ %s,\n", PixelFormatEnumName(resource->pixelFormat));
 		fprintf(file, "\t\t\t/* resolution */ { %s, %d, %d },\n",
 			PipelineResolutionModeEnumName(resource->resolution.mode),
@@ -297,7 +320,15 @@ WritePipelineDescriptionInl(
 		fprintf(file, "\t\t\t/* historyLength */ %d,\n", resource->historyLength);
 		fprintf(file, "\t\t\t/* textureFilter */ %s,\n", TextureFilterEnumName(resource->textureFilter));
 		fprintf(file, "\t\t\t/* textureWrap */ %s,\n", TextureWrapEnumName(resource->textureWrap));
-		fprintf(file, "\t\t\t/* glTextureIds */ {0, 0, 0, 0}\n");
+		fprintf(file, "\t\t\t/* glTextureIds */ {0, 0, 0, 0},\n");
+		fprintf(file, "\t\t\t/* buffer */ { %s, %d, %d, %d, { %d, %d } }\n",
+			PipelineBufferSizingModeEnumName(resource->buffer.sizingMode),
+			resource->buffer.fixedElementCount,
+			resource->buffer.elementStrideInBytes,
+			resource->buffer.elementsPerUnit,
+			resource->buffer.tileSize[0],
+			resource->buffer.tileSize[1]
+		);
 		fprintf(file, "\t\t}%s\n", (resourceIndex + 1 < pipeline->numResources)? "," : "");
 	}
 	fprintf(file, "\t},\n");

@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <limits.h>
 #include "common.h"
 #include "app.h"
 #include "graphics.h"
@@ -43,10 +44,15 @@ static GLint s_presentInvResolutionUniformLocation = -1;
 
 typedef struct {
 	GLuint textureIds[PIPELINE_MAX_HISTORY_LENGTH];
+	GLuint bufferId;
+	size_t bufferSizeInBytes;
 	int width;
 	int height;
+	int bufferElementCount;
 	PixelFormat pixelFormat;
 	int historyLength;
+	int bufferStrideInBytes;
+	PipelineResourceType type;
 	bool initialized;
 } PipelineRuntimeResourceState;
 
@@ -70,10 +76,24 @@ static void GraphicsEnsurePipelineResources(
 	const PipelineDescription *pipeline,
 	const CurrentFrameParams *params
 );
+static void GraphicsCreateOrResizeTextureResource(
+	PipelineRuntimeResourceState *state,
+	const PipelineResource *resource,
+	int width,
+	int height
+);
+static void GraphicsCreateOrResizeBufferResource(
+	PipelineRuntimeResourceState *state,
+	const PipelineResource *resource,
+	int elementCount
+);
 static GLuint GraphicsAcquirePipelineResourceTexture(
 	int resourceIndex,
 	int frameCount,
 	int historyOffset
+);
+static GLuint GraphicsAcquirePipelineResourceBuffer(
+	int resourceIndex
 );
 static const PipelineResource *GraphicsGetPipelineResource(
 	const PipelineDescription *pipeline,
@@ -149,6 +169,9 @@ static bool GraphicsExecuteFragmentPassPipeline(
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
 			return false;
 		}
+		if (resource->type != PipelineResourceTypeTexture) {
+			return false;
+		}
 		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
 			binding->resourceIndex,
 			params->frameCount,
@@ -217,6 +240,12 @@ static bool GraphicsExecuteFragmentPassPipeline(
 		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
 		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glDeleteFramebuffers(1, &framebuffer);
+			glBindProgramPipeline(0);
+			return false;
+		}
+		if (resource->type != PipelineResourceTypeTexture) {
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glDeleteFramebuffers(1, &framebuffer);
 			glBindProgramPipeline(0);
@@ -414,6 +443,9 @@ static bool GraphicsExecutePresentPassPipeline(
 	const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
 	PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
 	if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+		return false;
+	}
+	if (resource->type != PipelineResourceTypeTexture) {
 		return false;
 	}
 	GLuint textureId = GraphicsAcquirePipelineResourceTexture(
@@ -736,11 +768,19 @@ static void GraphicsDeletePipelineRuntimeResource(
 			state->textureIds[historyIndex] = 0;
 		}
 	}
+	if (state->bufferId != 0) {
+		glDeleteBuffers(1, &state->bufferId);
+		state->bufferId = 0;
+	}
 	state->initialized = false;
 	state->width = 0;
 	state->height = 0;
+	state->bufferSizeInBytes = 0;
+	state->bufferElementCount = 0;
+	state->bufferStrideInBytes = 0;
 	state->pixelFormat = (PixelFormat)0;
 	state->historyLength = 0;
+	state->type = PipelineResourceTypeTexture;
 }
 
 static void GraphicsResetPipelineRuntimeResources(){
@@ -785,7 +825,51 @@ static void GraphicsResolveResourceDimensions(
 	if (outHeight) *outHeight = height;
 }
 
-static void GraphicsCreateOrResizePipelineResource(
+static int GraphicsResolveBufferElementCount(
+	const PipelineResource *resource,
+	const CurrentFrameParams *params
+){
+	if (resource == NULL || params == NULL) {
+		return 0;
+	}
+	int width = 0;
+	int height = 0;
+	GraphicsResolveResourceDimensions(resource, params, &width, &height);
+	long long elements = 0;
+	int elementsPerUnit = (resource->buffer.elementsPerUnit > 0) ? resource->buffer.elementsPerUnit : 1;
+
+	switch (resource->buffer.sizingMode) {
+		case PipelineBufferSizingModeFixed: {
+			elements = resource->buffer.fixedElementCount;
+		} break;
+		case PipelineBufferSizingModeFramebufferTiles: {
+			int tileWidth = (resource->buffer.tileSize[0] > 0) ? resource->buffer.tileSize[0] : 1;
+			int tileHeight = (resource->buffer.tileSize[1] > 0) ? resource->buffer.tileSize[1] : 1;
+			int tilesX = (width + tileWidth - 1) / tileWidth;
+			int tilesY = (height + tileHeight - 1) / tileHeight;
+			if (tilesX <= 0) tilesX = 1;
+			if (tilesY <= 0) tilesY = 1;
+			elements = (long long)tilesX * (long long)tilesY * (long long)elementsPerUnit;
+		} break;
+		case PipelineBufferSizingModeFramebufferPixels:
+		default: {
+			elements = (long long)width * (long long)height * (long long)elementsPerUnit;
+		} break;
+	}
+
+	if (elements <= 0) {
+		elements = elementsPerUnit;
+	}
+	if (elements <= 0) {
+		elements = 1;
+	}
+	if (elements > INT_MAX) {
+		elements = INT_MAX;
+	}
+	return (int)elements;
+}
+
+static void GraphicsCreateOrResizeTextureResource(
 	PipelineRuntimeResourceState *state,
 	const PipelineResource *resource,
 	int width,
@@ -797,7 +881,7 @@ static void GraphicsCreateOrResizePipelineResource(
 
 	bool needsRecreate = false;
 
-	if (state->initialized == false) {
+	if (state->initialized == false || state->type != PipelineResourceTypeTexture) {
 		needsRecreate = true;
 	} else if (state->width != width
 	|| state->height != height
@@ -811,7 +895,7 @@ static void GraphicsCreateOrResizePipelineResource(
 		GraphicsDeletePipelineRuntimeResource(state);
 	}
 
-	if (state->initialized == false) {
+	if (state->initialized == false || state->type != PipelineResourceTypeTexture) {
 		int historyLength = resource->historyLength;
 		if (historyLength <= 0) {
 			historyLength = 1;
@@ -857,6 +941,7 @@ static void GraphicsCreateOrResizePipelineResource(
 		);
 
 		state->initialized = true;
+		state->type = PipelineResourceTypeTexture;
 		state->width = width;
 		state->height = height;
 		state->pixelFormat = resource->pixelFormat;
@@ -879,6 +964,61 @@ static void GraphicsCreateOrResizePipelineResource(
 	}
 }
 
+static void GraphicsCreateOrResizeBufferResource(
+	PipelineRuntimeResourceState *state,
+	const PipelineResource *resource,
+	int elementCount
+){
+	if (state == NULL || resource == NULL) {
+		return;
+	}
+	if (elementCount <= 0) {
+		elementCount = 1;
+	}
+	int stride = (resource->buffer.elementStrideInBytes > 0) ? resource->buffer.elementStrideInBytes : 4;
+	size_t sizeInBytes = (size_t)elementCount * (size_t)stride;
+	if (sizeInBytes == 0) {
+		sizeInBytes = (size_t)stride;
+	}
+
+	bool needsRecreate = false;
+	if (state->initialized == false || state->type != PipelineResourceTypeBuffer) {
+		needsRecreate = true;
+	} else if (state->bufferSizeInBytes != sizeInBytes
+	|| state->bufferElementCount != elementCount
+	|| state->bufferStrideInBytes != stride
+	) {
+		needsRecreate = true;
+	}
+
+	if (needsRecreate) {
+		GraphicsDeletePipelineRuntimeResource(state);
+	}
+
+	if (state->bufferId == 0) {
+		glGenBuffers(1, &state->bufferId);
+	}
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, state->bufferId);
+	glBufferData(
+		GL_SHADER_STORAGE_BUFFER,
+		(GLsizeiptr)sizeInBytes,
+		NULL,
+		GL_DYNAMIC_DRAW
+	);
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+	state->initialized = true;
+	state->type = PipelineResourceTypeBuffer;
+	state->bufferSizeInBytes = sizeInBytes;
+	state->bufferElementCount = elementCount;
+	state->bufferStrideInBytes = stride;
+	state->historyLength = 1;
+	state->width = 0;
+	state->height = 0;
+	state->pixelFormat = DEFAULT_PIXEL_FORMAT;
+}
+
 static void GraphicsEnsurePipelineResources(
 	const PipelineDescription *pipeline,
 	const CurrentFrameParams *params
@@ -889,20 +1029,29 @@ static void GraphicsEnsurePipelineResources(
 	for (int resourceIndex = 0; resourceIndex < pipeline->numResources; ++resourceIndex) {
 		const PipelineResource *resource = &pipeline->resources[resourceIndex];
 		PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
-		int width = 0;
-		int height = 0;
-		GraphicsResolveResourceDimensions(
-			resource,
-			params,
-			&width,
-			&height
-		);
-		GraphicsCreateOrResizePipelineResource(
-			state,
-			resource,
-			width,
-			height
-		);
+		if (resource->type == PipelineResourceTypeBuffer) {
+			int elementCount = GraphicsResolveBufferElementCount(resource, params);
+			GraphicsCreateOrResizeBufferResource(
+				state,
+				resource,
+				elementCount
+			);
+		} else {
+			int width = 0;
+			int height = 0;
+			GraphicsResolveResourceDimensions(
+				resource,
+				params,
+				&width,
+				&height
+			);
+			GraphicsCreateOrResizeTextureResource(
+				state,
+				resource,
+				width,
+				height
+			);
+		}
 	}
 }
 
@@ -915,7 +1064,7 @@ static GLuint GraphicsAcquirePipelineResourceTexture(
 		return 0;
 	}
 	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
-	if (state->initialized == false || state->historyLength <= 0) {
+	if (state->initialized == false || state->historyLength <= 0 || state->type != PipelineResourceTypeTexture) {
 		return 0;
 	}
 
@@ -936,6 +1085,19 @@ static GLuint GraphicsAcquirePipelineResourceTexture(
 	}
 
 	return state->textureIds[resolvedIndex];
+}
+
+static GLuint GraphicsAcquirePipelineResourceBuffer(
+	int resourceIndex
+){
+	if (resourceIndex < 0 || resourceIndex >= PIPELINE_MAX_RESOURCES) {
+		return 0;
+	}
+	PipelineRuntimeResourceState *state = &s_pipelineRuntimeResources[resourceIndex];
+	if (state->initialized == false || state->type != PipelineResourceTypeBuffer) {
+		return 0;
+	}
+	return state->bufferId;
 }
 
 static const PipelineResource *GraphicsGetPipelineResource(
@@ -1023,6 +1185,13 @@ static bool GraphicsExecuteComputePassPipeline(
 	GLuint boundImageUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
 	int numBoundImageUnits = 0;
 	GLenum boundImageAccess[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	GLuint boundSsboUnits[PIPELINE_MAX_BINDINGS_PER_PASS] = {0};
+	int numBoundSsboUnits = 0;
+	GLint nextSsboBinding = 0;
+	int ssboBindingForResource[PIPELINE_MAX_RESOURCES];
+	for (int i = 0; i < PIPELINE_MAX_RESOURCES; ++i) {
+		ssboBindingForResource[i] = -1;
+	}
 
 	/* Bind inputs */
 	for (int inputIndex = 0; inputIndex < pass->numInputs; ++inputIndex) {
@@ -1032,20 +1201,20 @@ static bool GraphicsExecuteComputePassPipeline(
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
 			return false;
 		}
-		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
-			binding->resourceIndex,
-			params->frameCount,
-			binding->historyOffset
-		);
-		if (textureId == 0) {
-			return false;
-		}
-
-		GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
-
 		switch (binding->access) {
 			case PipelineResourceAccessSampled:
 			case PipelineResourceAccessHistoryRead: {
+				if (resource->type != PipelineResourceTypeTexture) {
+					return false;
+				}
+				GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+					binding->resourceIndex,
+					params->frameCount,
+					binding->historyOffset
+				);
+				if (textureId == 0) {
+					return false;
+				}
 				GLuint samplerUnit = samplerUnitBase + samplerUnitCount;
 				glActiveTexture(GL_TEXTURE0 + samplerUnit);
 				glBindTexture(GL_TEXTURE_2D, textureId);
@@ -1059,6 +1228,18 @@ static bool GraphicsExecuteComputePassPipeline(
 				++samplerUnitCount;
 			} break;
 			case PipelineResourceAccessImageRead: {
+				if (resource->type != PipelineResourceTypeTexture) {
+					return false;
+				}
+				GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+					binding->resourceIndex,
+					params->frameCount,
+					binding->historyOffset
+				);
+				if (textureId == 0) {
+					return false;
+				}
+				GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
 				GLenum internalformat = pixelFormatInfo.internalformat != 0 ? pixelFormatInfo.internalformat : defaultPixelFormatInfo.internalformat;
 				GLint unit = nextImageUnit++;
 				glBindImageTexture(
@@ -1073,6 +1254,30 @@ static bool GraphicsExecuteComputePassPipeline(
 				boundImageUnits[numBoundImageUnits] = unit;
 				boundImageAccess[numBoundImageUnits] = GL_READ_ONLY;
 				++numBoundImageUnits;
+			} break;
+			case PipelineResourceAccessStorageRead: {
+				if (resource->type != PipelineResourceTypeBuffer) {
+					return false;
+				}
+				GLuint bufferId = GraphicsAcquirePipelineResourceBuffer(binding->resourceIndex);
+				if (bufferId == 0) {
+					return false;
+				}
+				int existingBinding = (binding->resourceIndex >= 0 && binding->resourceIndex < PIPELINE_MAX_RESOURCES)
+					? ssboBindingForResource[binding->resourceIndex]
+					: -1;
+				bool newlyAssigned = false;
+				if (existingBinding < 0) {
+					existingBinding = nextSsboBinding++;
+					if (binding->resourceIndex >= 0 && binding->resourceIndex < PIPELINE_MAX_RESOURCES) {
+						ssboBindingForResource[binding->resourceIndex] = existingBinding;
+					}
+					newlyAssigned = true;
+				}
+				glBindBufferBase(GL_SHADER_STORAGE_BUFFER, existingBinding, bufferId);
+				if (newlyAssigned) {
+					boundSsboUnits[numBoundSsboUnits++] = (GLuint)existingBinding;
+				}
 			} break;
 			default: {
 				/* Unsupported binding type for compute pass */
@@ -1090,19 +1295,22 @@ static bool GraphicsExecuteComputePassPipeline(
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
 			return false;
 		}
-		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
-			binding->resourceIndex,
-			params->frameCount,
-			binding->historyOffset
-		);
-		if (textureId == 0) {
-			return false;
-		}
-		GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
-		GLenum internalformat = pixelFormatInfo.internalformat != 0 ? pixelFormatInfo.internalformat : defaultPixelFormatInfo.internalformat;
 
 		switch (binding->access) {
 			case PipelineResourceAccessImageWrite: {
+				if (resource->type != PipelineResourceTypeTexture) {
+					return false;
+				}
+				GLuint textureId = GraphicsAcquirePipelineResourceTexture(
+					binding->resourceIndex,
+					params->frameCount,
+					binding->historyOffset
+				);
+				if (textureId == 0) {
+					return false;
+				}
+				GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
+				GLenum internalformat = pixelFormatInfo.internalformat != 0 ? pixelFormatInfo.internalformat : defaultPixelFormatInfo.internalformat;
 				GLint unit = nextImageUnit++;
 				glBindImageTexture(
 					unit,
@@ -1116,6 +1324,32 @@ static bool GraphicsExecuteComputePassPipeline(
 				boundImageUnits[numBoundImageUnits] = unit;
 				boundImageAccess[numBoundImageUnits] = GL_WRITE_ONLY;
 				++numBoundImageUnits;
+				hasWritableOutput = true;
+			} break;
+			case PipelineResourceAccessStorageWrite:
+			case PipelineResourceAccessStorageReadWrite: {
+				if (resource->type != PipelineResourceTypeBuffer) {
+					return false;
+				}
+				GLuint bufferId = GraphicsAcquirePipelineResourceBuffer(binding->resourceIndex);
+				if (bufferId == 0) {
+					return false;
+				}
+				int existingBinding = (binding->resourceIndex >= 0 && binding->resourceIndex < PIPELINE_MAX_RESOURCES)
+					? ssboBindingForResource[binding->resourceIndex]
+					: -1;
+				bool newlyAssigned = false;
+				if (existingBinding < 0) {
+					existingBinding = nextSsboBinding++;
+					if (binding->resourceIndex >= 0 && binding->resourceIndex < PIPELINE_MAX_RESOURCES) {
+						ssboBindingForResource[binding->resourceIndex] = existingBinding;
+					}
+					newlyAssigned = true;
+				}
+				glBindBufferBase(GL_SHADER_STORAGE_BUFFER, existingBinding, bufferId);
+				if (newlyAssigned) {
+					boundSsboUnits[numBoundSsboUnits++] = (GLuint)existingBinding;
+				}
 				hasWritableOutput = true;
 			} break;
 			default: {
@@ -1207,6 +1441,7 @@ static bool GraphicsExecuteComputePassPipeline(
 			GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
 		|	GL_TEXTURE_FETCH_BARRIER_BIT
 		|	GL_TEXTURE_UPDATE_BARRIER_BIT
+		|	GL_SHADER_STORAGE_BARRIER_BIT
 	);
 
 	/* Unbind image units */
@@ -1222,6 +1457,12 @@ static bool GraphicsExecuteComputePassPipeline(
 			access,
 			defaultPixelFormatInfo.internalformat != 0 ? defaultPixelFormatInfo.internalformat : GL_RGBA8
 		);
+	}
+
+	/* Unbind SSBOs */
+	for (int index = 0; index < numBoundSsboUnits; ++index) {
+		GLuint unit = boundSsboUnits[index];
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, unit, 0);
 	}
 
 	/* Unbind textures */
