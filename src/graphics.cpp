@@ -63,8 +63,42 @@ static void GraphicsDebugLogComputeFailure(
 		detail
 	);
 }
+
+static void GraphicsDebugLogFragmentFailure(
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const char *format,
+	...
+){
+	if (format == NULL) {
+		return;
+	}
+	char detail[512] = {0};
+	va_list args;
+	va_start(args, format);
+	_vsnprintf_s(detail, sizeof(detail), _TRUNCATE, format, args);
+	va_end(args);
+	int frame = params ? params->frameCount : -1;
+	const char *passName = (pass && pass->name[0] != '\0') ? pass->name : "<unnamed>";
+	GraphicsDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" failure: %s\n",
+		frame,
+		passName,
+		detail
+	);
+}
 #else
 static void GraphicsDebugLogComputeFailure(
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const char *format,
+	...
+){
+	(void)pass;
+	(void)params;
+	(void)format;
+}
+
+static void GraphicsDebugLogFragmentFailure(
 	const PipelinePass *pass,
 	const CurrentFrameParams *params,
 	const char *format,
@@ -208,9 +242,25 @@ static bool GraphicsExecuteFragmentPassPipeline(
 	const RenderSettings *settings
 ){
 	if (pipeline == NULL || pass == NULL || params == NULL || settings == NULL) {
+		GraphicsDebugLogFragmentFailure(
+			pass,
+			params,
+			"invalid arguments pipeline=%p pass=%p params=%p settings=%p",
+			pipeline,
+			pass,
+			params,
+			settings
+		);
 		return false;
 	}
 	if (s_fragmentShaderId == 0 || s_shaderPipelineId == 0) {
+		GraphicsDebugLogFragmentFailure(
+			pass,
+			params,
+			"fragment shader or pipeline not ready (shader=%u pipeline=%u)",
+			(unsigned)s_fragmentShaderId,
+			(unsigned)s_shaderPipelineId
+		);
 		return false;
 	}
 
@@ -229,9 +279,27 @@ static bool GraphicsExecuteFragmentPassPipeline(
 		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
 		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			GraphicsDebugLogFragmentFailure(
+				pass,
+				params,
+				"output %d resource %d unavailable (resource=%p runtime=%p initialized=%d)",
+				outputIndex,
+				binding->resourceIndex,
+				resource,
+				runtimeState,
+				(runtimeState != NULL) ? runtimeState->initialized : 0
+			);
 			return false;
 		}
 		if (resource->type != PipelineResourceTypeTexture) {
+			GraphicsDebugLogFragmentFailure(
+				pass,
+				params,
+				"output %d resource %d expected texture but type=%d",
+				outputIndex,
+				binding->resourceIndex,
+				resource->type
+			);
 			return false;
 		}
 		GLuint textureId = GraphicsAcquirePipelineResourceTexture(
@@ -240,6 +308,14 @@ static bool GraphicsExecuteFragmentPassPipeline(
 			binding->historyOffset
 		);
 		if (textureId == 0) {
+			GraphicsDebugLogFragmentFailure(
+				pass,
+				params,
+				"output %d resource %d texture acquire failed (historyOffset=%d)",
+				outputIndex,
+				binding->resourceIndex,
+				binding->historyOffset
+			);
 			return false;
 		}
 		if (numColorAttachments == 0) {
@@ -264,6 +340,11 @@ static bool GraphicsExecuteFragmentPassPipeline(
 
 	if (numColorAttachments == 0) {
 		/* No color targets -> fall back */
+		GraphicsDebugLogFragmentFailure(
+			pass,
+			params,
+			"no color attachments bound"
+		);
 		if (framebuffer != 0) {
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glDeleteFramebuffers(1, &framebuffer);
@@ -272,7 +353,14 @@ static bool GraphicsExecuteFragmentPassPipeline(
 	}
 
 	glDrawBuffers(numColorAttachments, drawBuffers);
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+	GLenum framebufferStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (framebufferStatus != GL_FRAMEBUFFER_COMPLETE) {
+		GraphicsDebugLogFragmentFailure(
+			pass,
+			params,
+			"framebuffer incomplete status=0x%04X",
+			framebufferStatus
+		);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glDeleteFramebuffers(1, &framebuffer);
 		return false;
@@ -302,12 +390,30 @@ static bool GraphicsExecuteFragmentPassPipeline(
 		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
 		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			GraphicsDebugLogFragmentFailure(
+				pass,
+				params,
+				"input %d resource %d unavailable (resource=%p runtime=%p initialized=%d)",
+				inputIndex,
+				binding->resourceIndex,
+				resource,
+				runtimeState,
+				(runtimeState != NULL) ? runtimeState->initialized : 0
+			);
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glDeleteFramebuffers(1, &framebuffer);
 			glBindProgramPipeline(0);
 			return false;
 		}
 		if (resource->type != PipelineResourceTypeTexture) {
+			GraphicsDebugLogFragmentFailure(
+				pass,
+				params,
+				"input %d resource %d expected texture but type=%d",
+				inputIndex,
+				binding->resourceIndex,
+				resource->type
+			);
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glDeleteFramebuffers(1, &framebuffer);
 			glBindProgramPipeline(0);
@@ -319,6 +425,14 @@ static bool GraphicsExecuteFragmentPassPipeline(
 			binding->historyOffset
 		);
 		if (textureId == 0) {
+			GraphicsDebugLogFragmentFailure(
+				pass,
+				params,
+				"input %d resource %d texture acquire failed (historyOffset=%d)",
+				inputIndex,
+				binding->resourceIndex,
+				binding->historyOffset
+			);
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glDeleteFramebuffers(1, &framebuffer);
 			glBindProgramPipeline(0);
@@ -804,7 +918,24 @@ static void GraphicsExecutePipeline(
 				}
 			} break;
 			case PipelinePassTypeFragment: {
-				if (!GraphicsExecuteFragmentPassPipeline(pipeline, pass, params, settings)) {
+				bool fragmentExecuted = false;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				const int debugFrameCount = params ? params->frameCount : -1;
+				const char *debugPassName = pass->name;
+				GraphicsDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" draw begin\n",
+					debugFrameCount,
+					debugPassName
+				);
+#endif
+				fragmentExecuted = GraphicsExecuteFragmentPassPipeline(pipeline, pass, params, settings);
+#if ENABLE_PIPELINE_DEBUG_LOG
+				GraphicsDebugPrint("[Pipeline Debug] frame %d fragment pass \"%s\" %s\n",
+					debugFrameCount,
+					debugPassName,
+					fragmentExecuted ? "executed via pipeline" : "falling back to legacy fullscreen quad"
+				);
+#endif
+				if (!fragmentExecuted) {
 					GraphicsDrawFullScreenQuad(
 						0,
 						params,
