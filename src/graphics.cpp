@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 #include <limits.h>
+#include <stdio.h>
+#include <stdarg.h>
 #include "common.h"
 #include "app.h"
 #include "graphics.h"
@@ -13,6 +15,66 @@
 #include "tiny_vmath.h"
 #include "dds_parser.h"
 #include "pipeline_description.h"
+
+#ifndef ENABLE_PIPELINE_DEBUG_LOG
+#define ENABLE_PIPELINE_DEBUG_LOG 1
+#endif
+
+#if ENABLE_PIPELINE_DEBUG_LOG
+static FILE *GraphicsDebugGetFileHandle(){
+	static FILE *s_file = NULL;
+	if (s_file == NULL) {
+		fopen_s(&s_file, "pipeline_debug_log.txt", "a");
+	}
+	return s_file;
+}
+
+static void GraphicsDebugPrint(const char *format, ...){
+	FILE *file = GraphicsDebugGetFileHandle();
+	if (file == NULL) {
+		return;
+	}
+	va_list args;
+	va_start(args, format);
+	vfprintf(file, format, args);
+	va_end(args);
+	fflush(file);
+}
+
+static void GraphicsDebugLogComputeFailure(
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const char *format,
+	...
+){
+	if (format == NULL) {
+		return;
+	}
+	char detail[512] = {0};
+	va_list args;
+	va_start(args, format);
+	_vsnprintf_s(detail, sizeof(detail), _TRUNCATE, format, args);
+	va_end(args);
+	int frame = params ? params->frameCount : -1;
+	const char *passName = (pass && pass->name[0] != '\0') ? pass->name : "<unnamed>";
+	GraphicsDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" failure: %s\n",
+		frame,
+		passName,
+		detail
+	);
+}
+#else
+static void GraphicsDebugLogComputeFailure(
+	const PipelinePass *pass,
+	const CurrentFrameParams *params,
+	const char *format,
+	...
+){
+	(void)pass;
+	(void)params;
+	(void)format;
+}
+#endif
 
 
 #define USER_TEXTURE_START_INDEX				(8)
@@ -720,7 +782,24 @@ static void GraphicsExecutePipeline(
 		s_activePipelinePassIndex = passIndex;
 		switch (pass->type) {
 			case PipelinePassTypeCompute: {
-				if (!GraphicsExecuteComputePassPipeline(pipeline, pass, params, settings)) {
+				bool computeExecuted = false;
+#if ENABLE_PIPELINE_DEBUG_LOG
+				const int debugFrameCount = params ? params->frameCount : -1;
+				const char *debugPassName = pass->name;
+				GraphicsDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" dispatch begin\n",
+					debugFrameCount,
+					debugPassName
+				);
+#endif
+				computeExecuted = GraphicsExecuteComputePassPipeline(pipeline, pass, params, settings);
+#if ENABLE_PIPELINE_DEBUG_LOG
+				GraphicsDebugPrint("[Pipeline Debug] frame %d compute pass \"%s\" %s\n",
+					debugFrameCount,
+					debugPassName,
+					computeExecuted ? "executed via pipeline" : "falling back to legacy dispatch"
+				);
+#endif
+				if (!computeExecuted) {
 					GraphicsDispatchCompute(params, settings);
 				}
 			} break;
@@ -1169,9 +1248,23 @@ static bool GraphicsExecuteComputePassPipeline(
 	const RenderSettings *settings
 ){
 	if (pipeline == NULL || pass == NULL || params == NULL || settings == NULL) {
+		GraphicsDebugLogComputeFailure(
+			pass,
+			params,
+			"invalid arguments pipeline=%p pass=%p params=%p settings=%p",
+			pipeline,
+			pass,
+			params,
+			settings
+		);
 		return false;
 	}
 	if (s_computeShaderId == 0) {
+		GraphicsDebugLogComputeFailure(
+			pass,
+			params,
+			"compute shader not ready"
+		);
 		return false;
 	}
 
@@ -1199,12 +1292,30 @@ static bool GraphicsExecuteComputePassPipeline(
 		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
 		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			GraphicsDebugLogComputeFailure(
+				pass,
+				params,
+				"input %d resource %d unavailable (resource=%p runtime=%p initialized=%d)",
+				inputIndex,
+				binding->resourceIndex,
+				resource,
+				runtimeState,
+				(runtimeState != NULL) ? runtimeState->initialized : 0
+			);
 			return false;
 		}
 		switch (binding->access) {
 			case PipelineResourceAccessSampled:
 			case PipelineResourceAccessHistoryRead: {
 				if (resource->type != PipelineResourceTypeTexture) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"input %d resource %d expected texture but type=%d",
+						inputIndex,
+						binding->resourceIndex,
+						resource->type
+					);
 					return false;
 				}
 				GLuint textureId = GraphicsAcquirePipelineResourceTexture(
@@ -1213,6 +1324,14 @@ static bool GraphicsExecuteComputePassPipeline(
 					binding->historyOffset
 				);
 				if (textureId == 0) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"input %d resource %d texture acquire failed (historyOffset=%d)",
+						inputIndex,
+						binding->resourceIndex,
+						binding->historyOffset
+					);
 					return false;
 				}
 				GLuint samplerUnit = samplerUnitBase + samplerUnitCount;
@@ -1229,6 +1348,14 @@ static bool GraphicsExecuteComputePassPipeline(
 			} break;
 			case PipelineResourceAccessImageRead: {
 				if (resource->type != PipelineResourceTypeTexture) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"input %d resource %d expected texture for image read but type=%d",
+						inputIndex,
+						binding->resourceIndex,
+						resource->type
+					);
 					return false;
 				}
 				GLuint textureId = GraphicsAcquirePipelineResourceTexture(
@@ -1237,6 +1364,14 @@ static bool GraphicsExecuteComputePassPipeline(
 					binding->historyOffset
 				);
 				if (textureId == 0) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"input %d resource %d texture acquire failed for image read (historyOffset=%d)",
+						inputIndex,
+						binding->resourceIndex,
+						binding->historyOffset
+					);
 					return false;
 				}
 				GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
@@ -1257,10 +1392,25 @@ static bool GraphicsExecuteComputePassPipeline(
 			} break;
 			case PipelineResourceAccessStorageRead: {
 				if (resource->type != PipelineResourceTypeBuffer) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"input %d resource %d expected buffer for storage read but type=%d",
+						inputIndex,
+						binding->resourceIndex,
+						resource->type
+					);
 					return false;
 				}
 				GLuint bufferId = GraphicsAcquirePipelineResourceBuffer(binding->resourceIndex);
 				if (bufferId == 0) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"input %d resource %d buffer acquire failed",
+						inputIndex,
+						binding->resourceIndex
+					);
 					return false;
 				}
 				int existingBinding = (binding->resourceIndex >= 0 && binding->resourceIndex < PIPELINE_MAX_RESOURCES)
@@ -1281,6 +1431,14 @@ static bool GraphicsExecuteComputePassPipeline(
 			} break;
 			default: {
 				/* Unsupported binding type for compute pass */
+				GraphicsDebugLogComputeFailure(
+					pass,
+					params,
+					"input %d resource %d unsupported access=%d",
+					inputIndex,
+					binding->resourceIndex,
+					binding->access
+				);
 				return false;
 			} break;
 		}
@@ -1293,12 +1451,30 @@ static bool GraphicsExecuteComputePassPipeline(
 		const PipelineResource *resource = GraphicsGetPipelineResource(pipeline, binding->resourceIndex);
 		PipelineRuntimeResourceState *runtimeState = GraphicsGetPipelineRuntimeResource(binding->resourceIndex);
 		if (resource == NULL || runtimeState == NULL || runtimeState->initialized == false) {
+			GraphicsDebugLogComputeFailure(
+				pass,
+				params,
+				"output %d resource %d unavailable (resource=%p runtime=%p initialized=%d)",
+				outputIndex,
+				binding->resourceIndex,
+				resource,
+				runtimeState,
+				(runtimeState != NULL) ? runtimeState->initialized : 0
+			);
 			return false;
 		}
 
 		switch (binding->access) {
 			case PipelineResourceAccessImageWrite: {
 				if (resource->type != PipelineResourceTypeTexture) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"output %d resource %d expected texture for image write but type=%d",
+						outputIndex,
+						binding->resourceIndex,
+						resource->type
+					);
 					return false;
 				}
 				GLuint textureId = GraphicsAcquirePipelineResourceTexture(
@@ -1307,6 +1483,14 @@ static bool GraphicsExecuteComputePassPipeline(
 					binding->historyOffset
 				);
 				if (textureId == 0) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"output %d resource %d texture acquire failed for image write (historyOffset=%d)",
+						outputIndex,
+						binding->resourceIndex,
+						binding->historyOffset
+					);
 					return false;
 				}
 				GlPixelFormatInfo pixelFormatInfo = PixelFormatToGlPixelFormatInfo(resource->pixelFormat);
@@ -1329,10 +1513,25 @@ static bool GraphicsExecuteComputePassPipeline(
 			case PipelineResourceAccessStorageWrite:
 			case PipelineResourceAccessStorageReadWrite: {
 				if (resource->type != PipelineResourceTypeBuffer) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"output %d resource %d expected buffer for storage write but type=%d",
+						outputIndex,
+						binding->resourceIndex,
+						resource->type
+					);
 					return false;
 				}
 				GLuint bufferId = GraphicsAcquirePipelineResourceBuffer(binding->resourceIndex);
 				if (bufferId == 0) {
+					GraphicsDebugLogComputeFailure(
+						pass,
+						params,
+						"output %d resource %d buffer acquire failed",
+						outputIndex,
+						binding->resourceIndex
+					);
 					return false;
 				}
 				int existingBinding = (binding->resourceIndex >= 0 && binding->resourceIndex < PIPELINE_MAX_RESOURCES)
@@ -1354,6 +1553,14 @@ static bool GraphicsExecuteComputePassPipeline(
 			} break;
 			default: {
 				/* Unsupported output access for compute */
+				GraphicsDebugLogComputeFailure(
+					pass,
+					params,
+					"output %d resource %d unsupported access=%d",
+					outputIndex,
+					binding->resourceIndex,
+					binding->access
+				);
 				return false;
 			} break;
 		}
@@ -1361,6 +1568,11 @@ static bool GraphicsExecuteComputePassPipeline(
 
 	if (hasWritableOutput == false) {
 		/* Nothing useful to write; fall back */
+		GraphicsDebugLogComputeFailure(
+			pass,
+			params,
+			"no writable outputs bound"
+		);
 		return false;
 	}
 
