@@ -20,7 +20,7 @@ extern "C" {
 #endif
 
 #define PIPELINE_MAX_RESOURCES                 (32)
-#define PIPELINE_MAX_PASSES                    (16)
+#define PIPELINE_MAX_PASSES                    (32)
 #define PIPELINE_MAX_BINDINGS_PER_PASS         (16)
 #define PIPELINE_MAX_HISTORY_LENGTH            (4)
 #define PIPELINE_MAX_RESOURCE_ID_LENGTH        (64)
