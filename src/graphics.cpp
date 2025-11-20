@@ -37,6 +37,9 @@ static int s_yReso = DEFAULT_SCREEN_YRESO;
 static PipelineDescription s_pipelineDescription = {{0}};
 static bool s_pipelineHasCustomDescription = false;
 static int s_activePipelinePassIndex = -1;
+static bool s_pipelinePassExecuted[PIPELINE_MAX_PASSES] = {0};
+static PipelineDescription s_cachedPipelineLayoutForExecution = {{0}};
+static bool s_cachedPipelineLayoutValid = false;
 static GLuint s_presentPipelineId = 0;
 static GLuint s_presentFragmentShaderId = 0;
 static GLint s_presentChannelUniformLocation = -1;
@@ -76,6 +79,8 @@ static void GraphicsEnsurePipelineResources(
 	const PipelineDescription *pipeline,
 	const CurrentFrameParams *params
 );
+static void GraphicsResetPipelinePassExecutionState();
+static void GraphicsSyncPipelinePassExecutionState(const PipelineDescription *pipeline);
 static void GraphicsCreateOrResizeTextureResource(
 	PipelineRuntimeResourceState *state,
 	const PipelineResource *resource,
@@ -713,16 +718,24 @@ static void GraphicsExecutePipeline(
 		return;
 	}
 
+	GraphicsSyncPipelinePassExecutionState(pipeline);
 	GraphicsEnsurePipelineResources(pipeline, params);
 
 	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
 		const PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->execution == PipelinePassExecutionOnce && passIndex >= 0 && passIndex < PIPELINE_MAX_PASSES) {
+			if (s_pipelinePassExecuted[passIndex]) {
+				continue;
+			}
+		}
+		bool executed = false;
 		s_activePipelinePassIndex = passIndex;
 		switch (pass->type) {
 			case PipelinePassTypeCompute: {
 				if (!GraphicsExecuteComputePassPipeline(pipeline, pass, params, settings)) {
 					GraphicsDispatchCompute(params, settings);
 				}
+				executed = true;
 			} break;
 			case PipelinePassTypeFragment: {
 				if (!GraphicsExecuteFragmentPassPipeline(pipeline, pass, params, settings)) {
@@ -732,6 +745,7 @@ static void GraphicsExecutePipeline(
 						settings
 					);
 				}
+				executed = true;
 			} break;
 			case PipelinePassTypePresent: {
 				if (!GraphicsExecutePresentPassPipeline(pipeline, pass, params, settings)) {
@@ -742,10 +756,14 @@ static void GraphicsExecutePipeline(
 						settings
 					);
 				}
+				executed = true;
 			} break;
 			default: {
 				/* 未対応のパスはスキップ */
 			} break;
+		}
+		if (executed && pass->execution == PipelinePassExecutionOnce && passIndex >= 0 && passIndex < PIPELINE_MAX_PASSES) {
+			s_pipelinePassExecuted[passIndex] = true;
 		}
 		s_activePipelinePassIndex = -1;
 	}
@@ -786,6 +804,26 @@ static void GraphicsDeletePipelineRuntimeResource(
 static void GraphicsResetPipelineRuntimeResources(){
 	for (int resourceIndex = 0; resourceIndex < PIPELINE_MAX_RESOURCES; ++resourceIndex) {
 		GraphicsDeletePipelineRuntimeResource(&s_pipelineRuntimeResources[resourceIndex]);
+	}
+	GraphicsResetPipelinePassExecutionState();
+}
+
+static void GraphicsResetPipelinePassExecutionState(){
+	memset(s_pipelinePassExecuted, 0, sizeof(s_pipelinePassExecuted));
+	memset(&s_cachedPipelineLayoutForExecution, 0, sizeof(s_cachedPipelineLayoutForExecution));
+	s_cachedPipelineLayoutValid = false;
+}
+
+static void GraphicsSyncPipelinePassExecutionState(const PipelineDescription *pipeline){
+	if (pipeline == NULL) {
+		GraphicsResetPipelinePassExecutionState();
+		return;
+	}
+	if (!s_cachedPipelineLayoutValid
+	||	memcmp(&s_cachedPipelineLayoutForExecution, pipeline, sizeof(PipelineDescription)) != 0) {
+		GraphicsResetPipelinePassExecutionState();
+		memcpy(&s_cachedPipelineLayoutForExecution, pipeline, sizeof(PipelineDescription));
+		s_cachedPipelineLayoutValid = true;
 	}
 }
 

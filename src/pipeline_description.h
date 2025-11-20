@@ -19,8 +19,8 @@ typedef struct cJSON cJSON;
 extern "C" {
 #endif
 
-#define PIPELINE_MAX_RESOURCES                 (32)
-#define PIPELINE_MAX_PASSES                    (32)
+#define PIPELINE_MAX_RESOURCES                 (64)
+#define PIPELINE_MAX_PASSES                    (64)
 #define PIPELINE_MAX_BINDINGS_PER_PASS         (16)
 #define PIPELINE_MAX_HISTORY_LENGTH            (4)
 #define PIPELINE_MAX_RESOURCE_ID_LENGTH        (64)
@@ -33,6 +33,12 @@ typedef enum {
     PipelinePassTypePresent,
     PipelinePassTypeCount
 } PipelinePassType;
+
+typedef enum {
+    PipelinePassExecutionAlways,
+    PipelinePassExecutionOnce,
+    PipelinePassExecutionCount
+} PipelinePassExecution;
 
 typedef enum {
     PipelineResourceTypeTexture,
@@ -116,6 +122,7 @@ typedef struct {
 typedef struct {
     char name[PIPELINE_MAX_PASS_NAME_LENGTH];
     PipelinePassType type;
+    PipelinePassExecution execution;
     char shaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
     GLuint programId;
     PipelineResourceBinding inputs[PIPELINE_MAX_BINDINGS_PER_PASS];
@@ -151,6 +158,9 @@ cJSON *PipelineDescriptionSerializeToJson(
 
 const char *PipelinePassTypeToString(PipelinePassType type);
 bool PipelinePassTypeFromString(const char *value, PipelinePassType *type);
+
+const char *PipelinePassExecutionToString(PipelinePassExecution execution);
+bool PipelinePassExecutionFromString(const char *value, PipelinePassExecution *execution);
 
 const char *PipelineResourceTypeToString(PipelineResourceType type);
 bool PipelineResourceTypeFromString(const char *value, PipelineResourceType *type);

@@ -26,8 +26,8 @@
 
 #define COMPUTE_TEXTURE_START_INDEX				(4)
 
-#define PIPELINE_MAX_RESOURCES				(32)
-#define PIPELINE_MAX_PASSES				(32)
+#define PIPELINE_MAX_RESOURCES				(64)
+#define PIPELINE_MAX_PASSES				(64)
 #define PIPELINE_MAX_BINDINGS_PER_PASS		(16)
 #define PIPELINE_MAX_HISTORY_LENGTH		(4)
 #define PIPELINE_MAX_RESOURCE_ID_LENGTH	(64)
@@ -56,6 +56,11 @@ typedef enum {
 	PipelinePassTypeCompute,
 	PipelinePassTypePresent,
 } PipelinePassType;
+
+typedef enum {
+	PipelinePassExecutionAlways,
+	PipelinePassExecutionOnce,
+} PipelinePassExecution;
 
 typedef enum {
 	PipelineResourceTypeTexture,
@@ -134,6 +139,7 @@ typedef struct {
 typedef struct {
 	char name[PIPELINE_MAX_PASS_NAME_LENGTH];
 	PipelinePassType type;
+	PipelinePassExecution execution;
 	char shaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
 	GLuint programId;
 	PipelineResourceBinding inputs[PIPELINE_MAX_BINDINGS_PER_PASS];
@@ -171,6 +177,7 @@ typedef struct {
 
 static PipelineDescription s_pipelineDescription = {0};
 static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESOURCES] = {{0}};
+static bool s_pipelinePassExecuted[PIPELINE_MAX_PASSES] = {0};
 static int s_activePipelinePassIndex = -1;
 static bool s_fragmentPipelinePassUniformAvailable = false;
 static bool s_fragmentWaveOutUniformAvailable = false;
@@ -1541,6 +1548,11 @@ entrypoint(
 
 		for (int passIndex = 0; passIndex < s_pipelineDescription.numPasses; ++passIndex) {
 			const PipelinePass *pass = &s_pipelineDescription.passes[passIndex];
+			if (pass->execution == PipelinePassExecutionOnce && passIndex >= 0 && passIndex < PIPELINE_MAX_PASSES) {
+				if (s_pipelinePassExecuted[passIndex]) {
+					continue;
+				}
+			}
 			bool executed = false;
 			s_activePipelinePassIndex = passIndex;
 			switch (pass->type) {
@@ -1557,19 +1569,22 @@ entrypoint(
 					executed = false;
 				} break;
 			}
-				if (!executed && s_loggedPipelineExecutionFailure == false) {
-					char debugMessage[256];
-					wsprintfA(
-						debugMessage,
-						"[Pipeline Warning] Pass \"%s\" (type %d) failed to execute.\n",
-						pass->name,
-						(int)pass->type
-					);
-					OutputDebugStringA(debugMessage);
-					s_loggedPipelineExecutionFailure = true;
-				}
-				s_activePipelinePassIndex = -1;
+			if (executed && pass->execution == PipelinePassExecutionOnce && passIndex >= 0 && passIndex < PIPELINE_MAX_PASSES) {
+				s_pipelinePassExecuted[passIndex] = true;
 			}
+			if (!executed && s_loggedPipelineExecutionFailure == false) {
+				char debugMessage[256];
+				wsprintfA(
+					debugMessage,
+					"[Pipeline Warning] Pass \"%s\" (type %d) failed to execute.\n",
+					pass->name,
+					(int)pass->type
+				);
+				OutputDebugStringA(debugMessage);
+				s_loggedPipelineExecutionFailure = true;
+			}
+			s_activePipelinePassIndex = -1;
+		}
 		s_activePipelinePassIndex = -1;
 
 		SwapBuffers(

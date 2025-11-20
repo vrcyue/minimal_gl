@@ -102,6 +102,19 @@ MinimalGL を使った PC 4K Intro 作成の簡単な流れは以下のように
 5. **エクスポート**  
 	準備が整った状態で通常どおりエクスポートすると、`pipeline_description.inl` がサンプル構成で生成され、ランタイム実行ファイルでも同じパイプラインが適用されます。
 
+## パスの実行頻度
+
+パスごとに `execution` を指定して実行頻度を制御できます。省略時は `always`（毎フレーム）。`once` を指定すると起動直後の 1 回だけ実行し、解像度変更やパイプライン差し替えでリソースが再生成されたときに自動で再実行されます。
+
+```json
+{
+	"name": "precompute_lut",
+	"type": "compute",
+	"execution": "once",
+	"outputs": [{ "resource": "lut", "usage": "image_write" }]
+}
+```
+
 ## Present パスのチャンネル表示切り替え
 
 MRT や Compute の途中結果を確認しやすいように、Present パスごとに描画チャネルを指定できます。`presentChannel` フィールドを追加して保存し、`File → Pipeline Management...` から `Load...` で読み込むだけで有効になります。

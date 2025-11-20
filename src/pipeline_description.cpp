@@ -20,6 +20,11 @@ typedef struct {
 
 typedef struct {
     const char *name;
+    PipelinePassExecution value;
+} PipelinePassExecutionEntry;
+
+typedef struct {
+    const char *name;
     PipelineResourceType value;
 } PipelineResourceTypeEntry;
 
@@ -62,6 +67,11 @@ static const PipelinePassTypeEntry s_passTypeTable[] = {
     {"fragment", PipelinePassTypeFragment},
     {"compute",  PipelinePassTypeCompute},
     {"present",  PipelinePassTypePresent},
+};
+
+static const PipelinePassExecutionEntry s_passExecutionTable[] = {
+    {"always", PipelinePassExecutionAlways},
+    {"once",   PipelinePassExecutionOnce},
 };
 
 static const PipelineResourceTypeEntry s_resourceTypeTable[] = {
@@ -177,6 +187,7 @@ static void InitResourceDefaults(PipelineResource *resource){
 static void InitPassDefaults(PipelinePass *pass){
     memset(pass, 0, sizeof(*pass));
     pass->type = PipelinePassTypeFragment;
+    pass->execution = PipelinePassExecutionAlways;
     pass->clear.clearColor[0] = 0.0f;
     pass->clear.clearColor[1] = 0.0f;
     pass->clear.clearColor[2] = 0.0f;
@@ -384,6 +395,28 @@ bool PipelinePassTypeFromString(const char *value, PipelinePassType *type){
 
 const char *PipelinePassTypeToString(PipelinePassType type){
     return LookupNameByPassType(type);
+}
+
+bool PipelinePassExecutionFromString(const char *value, PipelinePassExecution *execution){
+    if (value == NULL || execution == NULL) {
+        return false;
+    }
+    for (size_t index = 0; index < sizeof(s_passExecutionTable) / sizeof(s_passExecutionTable[0]); ++index) {
+        if (strcmp(value, s_passExecutionTable[index].name) == 0) {
+            *execution = s_passExecutionTable[index].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *PipelinePassExecutionToString(PipelinePassExecution execution){
+    for (size_t index = 0; index < sizeof(s_passExecutionTable) / sizeof(s_passExecutionTable[0]); ++index) {
+        if (s_passExecutionTable[index].value == execution) {
+            return s_passExecutionTable[index].name;
+        }
+    }
+    return NULL;
 }
 
 bool PipelineResourceTypeFromString(const char *value, PipelineResourceType *type){
@@ -1143,6 +1176,34 @@ static bool DeserializePass(
         return false;
     }
 
+    cJSON *jsonExecution = cJSON_GetObjectItemCaseSensitive(jsonPass, "execution");
+    if (jsonExecution != NULL) {
+        if (cJSON_IsString(jsonExecution) == false || jsonExecution->valuestring == NULL) {
+            SetErrorMessage(
+                errorMessage,
+                errorMessageSizeInBytes,
+                "\"execution\" must be a string in pass \"%s\".",
+                pass->name
+            );
+            return false;
+        }
+        char buffer[32] = {0};
+        strlcpy(buffer, jsonExecution->valuestring, sizeof(buffer));
+        for (size_t index = 0; buffer[index] != '\0'; ++index) {
+            buffer[index] = (char)tolower((unsigned char)buffer[index]);
+        }
+        if (!PipelinePassExecutionFromString(buffer, &pass->execution)) {
+            SetErrorMessage(
+                errorMessage,
+                errorMessageSizeInBytes,
+                "Unknown execution \"%s\" in pass \"%s\". Supported values are \"always\" and \"once\".",
+                jsonExecution->valuestring,
+                pass->name
+            );
+            return false;
+        }
+    }
+
     if (!ParseStringField(
             jsonPass,
             "shader",
@@ -1668,6 +1729,12 @@ cJSON *PipelineDescriptionSerializeToJson(const PipelineDescription *description
         const char *typeString = PipelinePassTypeToString(pass->type);
         if (typeString != NULL) {
             cJSON_AddStringToObject(jsonPass, "type", typeString);
+        }
+        if (pass->execution != PipelinePassExecutionAlways) {
+            const char *executionString = PipelinePassExecutionToString(pass->execution);
+            if (executionString != NULL) {
+                cJSON_AddStringToObject(jsonPass, "execution", executionString);
+            }
         }
         if (pass->shaderPath[0] != '\0') {
             cJSON_AddStringToObject(jsonPass, "shader", pass->shaderPath);

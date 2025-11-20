@@ -243,6 +243,15 @@ PipelinePassTypeEnumName(PipelinePassType type){
 }
 
 static const char *
+PipelinePassExecutionEnumName(PipelinePassExecution execution){
+	switch (execution) {
+		case PipelinePassExecutionAlways:	return "PipelinePassExecutionAlways";
+		case PipelinePassExecutionOnce:		return "PipelinePassExecutionOnce";
+		default:							return "PipelinePassExecutionAlways";
+	}
+}
+
+static const char *
 PipelineResourceTypeEnumName(PipelineResourceType type){
 	switch (type) {
 		case PipelineResourceTypeTexture:	return "PipelineResourceTypeTexture";
@@ -342,6 +351,7 @@ WritePipelineDescriptionInl(
 		WriteEscapedString(file, pass->name);
 		fprintf(file, ",\n");
 		fprintf(file, "\t\t\t/* type */ %s,\n", PipelinePassTypeEnumName(pass->type));
+		fprintf(file, "\t\t\t/* execution */ %s,\n", PipelinePassExecutionEnumName(pass->execution));
 		fprintf(file, "\t\t\t/* shaderPath */ ");
 		WriteEscapedString(file, pass->shaderPath);
 		fprintf(file, ",\n");
