@@ -14,6 +14,13 @@
 #include <stdio.h>
 #include <limits.h>
 
+#if defined(_M_IX86)
+/* MSVC 32-bit /NODEFAULTLIB ビルドで不足しがちな整数ヘルパーの自前定義 */
+extern "C" long long __cdecl __allmul(long long a, long long b){ return a * b; }
+extern "C" long long __cdecl __alldiv(long long a, long long b){ return b ? (a / b) : 0; }
+extern "C" unsigned long long __cdecl __aulldiv(unsigned long long a, unsigned long long b){ return b ? (a / b) : 0; }
+#endif
+
 #include "config.h"
 
 
@@ -96,6 +103,13 @@ typedef enum {
 	PipelineResolutionModeFramebuffer,
 	PipelineResolutionModeFixed,
 } PipelineResolutionMode;
+
+typedef struct {
+	int x;
+	int y;
+	int width;
+	int height;
+} ViewportRect;
 
 typedef struct {
 	PipelineResolutionMode mode;
@@ -645,6 +659,44 @@ static bool PipelineParseLegacyResourceIndex(
 	return true;
 }
 
+static void PipelineComputeCenteredViewportForAspect(
+	int screenWidth,
+	int screenHeight,
+	float targetAspect,
+	ViewportRect *outViewport
+){
+	if (outViewport == NULL) return;
+	if (screenWidth <= 0) screenWidth = 1;
+	if (screenHeight <= 0) screenHeight = 1;
+	if (targetAspect <= 0.0f) targetAspect = 1.0f;
+
+	float screenAspect = (float)screenWidth / (float)screenHeight;
+	ViewportRect vp = {0, 0, screenWidth, screenHeight};
+
+	if (screenAspect >= targetAspect) {
+		int targetWidth = (int)((float)screenHeight * targetAspect + 0.5f);
+		if (targetWidth < 1) targetWidth = 1;
+		if (targetWidth > screenWidth) targetWidth = screenWidth;
+		vp.width = targetWidth;
+		vp.height = screenHeight;
+		vp.x = (screenWidth - vp.width) / 2;
+		vp.y = 0;
+	} else {
+		int targetHeight = (int)((float)screenWidth / targetAspect + 0.5f);
+		if (targetHeight < 1) targetHeight = 1;
+		if (targetHeight > screenHeight) targetHeight = screenHeight;
+		vp.width = screenWidth;
+		vp.height = targetHeight;
+		vp.x = 0;
+		vp.y = (screenHeight - vp.height) / 2;
+	}
+	if (vp.x < 0) vp.x = 0;
+	if (vp.y < 0) vp.y = 0;
+	if (vp.width < 1) vp.width = 1;
+	if (vp.height < 1) vp.height = 1;
+	*outViewport = vp;
+}
+
 static bool PipelineExecuteComputePass(
 	const PipelineDescription *pipeline,
 	const PipelinePass *pass,
@@ -1078,6 +1130,16 @@ static bool PipelineExecutePresentPass(
 		return false;
 	}
 
+	/* Shorts 向け固定アスペクトで表示（9:16 ピラーボックス） */
+	const float targetAspect = 9.0f / 16.0f;
+	ViewportRect presentViewport = {0, 0, SCREEN_WIDTH, SCREEN_HEIGHT};
+	PipelineComputeCenteredViewportForAspect(
+		SCREEN_WIDTH,
+		SCREEN_HEIGHT,
+		targetAspect,
+		&presentViewport
+	);
+
 	GLuint readFramebuffer = 0;
 	glExtGenFramebuffers(1, &readFramebuffer);
 	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
@@ -1088,14 +1150,25 @@ static bool PipelineExecutePresentPass(
 		return false;
 	}
 	glExtBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glViewport(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glEnable(GL_SCISSOR_TEST);
+	glViewport(presentViewport.x, presentViewport.y, presentViewport.width, presentViewport.height);
+	glScissor(presentViewport.x, presentViewport.y, presentViewport.width, presentViewport.height);
 	glExtBlitNamedFramebuffer(
 		readFramebuffer,
 		0,
 		0, 0, state->width, state->height,
-		0, 0, SCREEN_WIDTH, SCREEN_HEIGHT,
+		presentViewport.x,
+		presentViewport.y,
+		presentViewport.x + presentViewport.width,
+		presentViewport.y + presentViewport.height,
 		GL_COLOR_BUFFER_BIT,
 		GL_NEAREST
 	);
+	glDisable(GL_SCISSOR_TEST);
 	glExtBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glExtDeleteFramebuffers(1, &readFramebuffer);
 	return true;

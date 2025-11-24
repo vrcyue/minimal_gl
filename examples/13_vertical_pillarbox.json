@@ -1,0 +1,45 @@
+{
+  "resources": [
+    {
+      "id": "vertical_scene",
+      "pixelFormat": "fp16_rgba",
+      "resolution": {
+        "mode": "fixed",
+        "width": 720,
+        "height": 1280
+      },
+      "historyLength": 1,
+      "sampler": {
+        "filter": "linear",
+        "wrap": "clamp_to_edge"
+      }
+    }
+  ],
+  "passes": [
+    {
+      "name": "scene",
+      "type": "fragment",
+      "shader": "examples/shaders/vertical_pillarbox_demo.glsl",
+      "outputs": [
+        {
+          "resource": "vertical_scene",
+          "usage": "color_attachment"
+        }
+      ],
+      "clear": {
+        "color": [0.0, 0.0, 0.0, 1.0],
+        "depth": 1.0
+      }
+    },
+    {
+      "name": "present",
+      "type": "present",
+      "inputs": [
+        {
+          "resource": "vertical_scene",
+          "usage": "sampled"
+        }
+      ]
+    }
+  ]
+}

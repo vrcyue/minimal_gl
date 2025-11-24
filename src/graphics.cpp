@@ -46,6 +46,13 @@ static GLint s_presentChannelUniformLocation = -1;
 static GLint s_presentInvResolutionUniformLocation = -1;
 
 typedef struct {
+	int x;
+	int y;
+	int width;
+	int height;
+} ViewportRect;
+
+typedef struct {
 	GLuint textureIds[PIPELINE_MAX_HISTORY_LENGTH];
 	GLuint bufferId;
 	size_t bufferSizeInBytes;
@@ -106,6 +113,12 @@ static const PipelineResource *GraphicsGetPipelineResource(
 );
 static PipelineRuntimeResourceState *GraphicsGetPipelineRuntimeResource(
 	int resourceIndex
+);
+static void GraphicsComputeCenteredViewportForAspect(
+	int screenWidth,
+	int screenHeight,
+	float targetAspect,
+	ViewportRect *outViewport
 );
 static bool GraphicsParseLegacyResourceIndex(
 	const PipelineResource *resource,
@@ -467,6 +480,14 @@ static bool GraphicsExecutePresentPassPipeline(
 	if (width <= 0) width = params->xReso;
 	if (height <= 0) height = params->yReso;
 
+	ViewportRect presentViewport = {0, 0, params->xReso, params->yReso};
+	GraphicsComputeCenteredViewportForAspect(
+		params->xReso,
+		params->yReso,
+		9.0f / 16.0f,
+		&presentViewport
+	);
+
 	bool useDebugChannel = (pass->presentChannel != PipelinePresentChannelRgba);
 	if (useDebugChannel && !GraphicsEnsurePresentPipeline()) {
 		useDebugChannel = false;
@@ -475,6 +496,22 @@ static bool GraphicsExecutePresentPassPipeline(
 	if (useDebugChannel) {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(0, 0, params->xReso, params->yReso);
+		glDisable(GL_SCISSOR_TEST);
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glEnable(GL_SCISSOR_TEST);
+		glViewport(
+			presentViewport.x,
+			presentViewport.y,
+			presentViewport.width,
+			presentViewport.height
+		);
+		glScissor(
+			presentViewport.x,
+			presentViewport.y,
+			presentViewport.width,
+			presentViewport.height
+		);
 
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, textureId);
@@ -504,6 +541,7 @@ static bool GraphicsExecutePresentPassPipeline(
 		glEnableVertexAttribArray(0);
 		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 		glDisableVertexAttribArray(0);
+		glDisable(GL_SCISSOR_TEST);
 
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glBindProgramPipeline(0);
@@ -530,12 +568,33 @@ static bool GraphicsExecutePresentPassPipeline(
 	}
 
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	glViewport(0, 0, params->xReso, params->yReso);
+	glDisable(GL_SCISSOR_TEST);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glEnable(GL_SCISSOR_TEST);
+	glViewport(
+		presentViewport.x,
+		presentViewport.y,
+		presentViewport.width,
+		presentViewport.height
+	);
+	glScissor(
+		presentViewport.x,
+		presentViewport.y,
+		presentViewport.width,
+		presentViewport.height
+	);
 	glBlitFramebuffer(
 		0, 0, width, height,
-		0, 0, params->xReso, params->yReso,
+		presentViewport.x,
+		presentViewport.y,
+		presentViewport.x + presentViewport.width,
+		presentViewport.y + presentViewport.height,
 		GL_COLOR_BUFFER_BIT,
 		GL_NEAREST
 	);
+	glDisable(GL_SCISSOR_TEST);
 
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 	glDeleteFramebuffers(1, &readFbo);
@@ -1147,6 +1206,48 @@ static const PipelineResource *GraphicsGetPipelineResource(
 		return NULL;
 	}
 	return &pipeline->resources[resourceIndex];
+}
+
+static void GraphicsComputeCenteredViewportForAspect(
+	int screenWidth,
+	int screenHeight,
+	float targetAspect,
+	ViewportRect *outViewport
+){
+	if (outViewport == NULL) return;
+	if (screenWidth <= 0) screenWidth = 1;
+	if (screenHeight <= 0) screenHeight = 1;
+	if (targetAspect <= 0.0f) targetAspect = 1.0f;
+
+	float screenAspect = (float)screenWidth / (float)screenHeight;
+	ViewportRect vp = {0, 0, screenWidth, screenHeight};
+
+	if (screenAspect >= targetAspect) {
+		/* Screen is wider than target aspect: fit to height. */
+		int targetWidth = (int)((float)screenHeight * targetAspect + 0.5f);
+		if (targetWidth < 1) targetWidth = 1;
+		if (targetWidth > screenWidth) targetWidth = screenWidth;
+		vp.width = targetWidth;
+		vp.height = screenHeight;
+		vp.x = (screenWidth - vp.width) / 2;
+		vp.y = 0;
+	} else {
+		/* Screen is taller than target aspect: fit to width. */
+		int targetHeight = (int)((float)screenWidth / targetAspect + 0.5f);
+		if (targetHeight < 1) targetHeight = 1;
+		if (targetHeight > screenHeight) targetHeight = screenHeight;
+		vp.width = screenWidth;
+		vp.height = targetHeight;
+		vp.x = 0;
+		vp.y = (screenHeight - vp.height) / 2;
+	}
+
+	if (vp.x < 0) vp.x = 0;
+	if (vp.y < 0) vp.y = 0;
+	if (vp.width < 1) vp.width = 1;
+	if (vp.height < 1) vp.height = 1;
+
+	*outViewport = vp;
 }
 
 static PipelineRuntimeResourceState *GraphicsGetPipelineRuntimeResource(
