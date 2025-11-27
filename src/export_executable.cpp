@@ -1174,6 +1174,8 @@ bool ExportExecutableSub(
 					/* main.obj -> main.exe */
 					"\"%s\" "								/* arg 1 = crinkler.exe のパス */
 						"OPENGL32.LIB WINMM.LIB KERNEL32.LIB USER32.LIB GDI32.LIB "
+						/* 64bit 乗算などで参照される CRT ヘルパーを明示リンク */
+						"VCRUNTIME.LIB UCRT.LIB MSVCRT.LIB "
 						"/SUBSYSTEM:WINDOWS "
 						"/ENTRY:entrypoint "
 						"/UNSAFEIMPORT "
