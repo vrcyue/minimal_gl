@@ -152,6 +152,7 @@ void GraphicsResetPipelineDescriptionToDefault();
 bool GraphicsApplyPipelineDescription(const struct PipelineDescription *pipeline);
 bool GraphicsHasCustomPipelineDescription();
 const struct PipelineDescription *GraphicsGetActivePipelineDescription();
+bool GraphicsReloadPipelineFragmentShaders(void);
 
 /* グラフィクスの更新 */
 void GraphicsUpdate(

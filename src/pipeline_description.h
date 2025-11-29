@@ -120,15 +120,16 @@ typedef struct {
 } PipelinePassClear;
 
 typedef struct {
-    char name[PIPELINE_MAX_PASS_NAME_LENGTH];
-    PipelinePassType type;
-    PipelinePassExecution execution;
-    char shaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
-    GLuint programId;
-    PipelineResourceBinding inputs[PIPELINE_MAX_BINDINGS_PER_PASS];
-    int numInputs;
-    PipelineResourceBinding outputs[PIPELINE_MAX_BINDINGS_PER_PASS];
-    int numOutputs;
+	char name[PIPELINE_MAX_PASS_NAME_LENGTH];
+	PipelinePassType type;
+	PipelinePassExecution execution;
+	char shaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
+	char resolvedShaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
+	GLuint programId;
+	PipelineResourceBinding inputs[PIPELINE_MAX_BINDINGS_PER_PASS];
+	int numInputs;
+	PipelineResourceBinding outputs[PIPELINE_MAX_BINDINGS_PER_PASS];
+	int numOutputs;
     PipelinePassClear clear;
     bool overrideWorkGroupSize;
     GLuint workGroupSize[3];

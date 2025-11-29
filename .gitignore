@@ -1,3 +1,11 @@
 /minimal_gl/x64/Release
 /x64
 /.vs
+x64 - コピー/Release/Crinkler.exe
+x64 - コピー/Release/imgui.ini
+x64 - コピー/Release/minimal_gl.exe
+x64 - コピー/Release/minimal_gl.exp
+x64 - コピー/Release/minimal_gl.lib
+x64 - コピー/Release/minimal_gl.pdb
+x64 - コピー/Release/pipeline_debug_log.txt
+x64 - コピー/Release/shader_minifier.exe

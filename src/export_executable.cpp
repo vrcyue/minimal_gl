@@ -355,6 +355,9 @@ WritePipelineDescriptionInl(
 		fprintf(file, "\t\t\t/* shaderPath */ ");
 		WriteEscapedString(file, pass->shaderPath);
 		fprintf(file, ",\n");
+		fprintf(file, "\t\t\t/* resolvedShaderPath */ ");
+		WriteEscapedString(file, pass->shaderPath);
+		fprintf(file, ",\n");
 		fprintf(file, "\t\t\t/* programId */ 0,\n");
 
 		fprintf(file, "\t\t\t/* inputs */ {\n");

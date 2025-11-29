@@ -96,6 +96,10 @@ static bool s_pipelineDescriptionIsValid = false;
 static char s_pipelineLastFileName[MAX_PATH] = {0};
 static struct stat s_pipelineFileStat;
 static void AppPipelineSetLastFileNameInternal(const char *fileName);
+static void AppResolvePipelineShaderPaths(struct PipelineDescription *pipeline, const char *basePath);
+static void AppPipelineResetPassFileStats();
+static void AppPipelineInitPassFileStats(const struct PipelineDescription *pipeline);
+static void AppPipelineHotReloadPassShaders();
 static bool AppPrepareShaderSource(
  const char *fileName,
  const char *fallbackSource,
@@ -169,6 +173,7 @@ static char s_graphicsShaderFileName[MAX_PATH] = "";
 static char *s_graphicsShaderCode = NULL;
 static struct stat s_graphicsShaderFileStat;
 static bool s_graphicsCreateShaderSucceeded = false;
+static struct stat s_pipelinePassFileStat[PIPELINE_MAX_PASSES] = {{0}};
 
 static char s_computeShaderFileName[MAX_PATH] = "";
 static char *s_computeShaderCode = NULL;
@@ -1415,14 +1420,22 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 					sizeof(errorMessage)
 			)
 			) {
+				AppResolvePipelineShaderPaths(&pipelineDescription, projectBasePath);
 				s_pipelineDescriptionForProject = pipelineDescription;
-				s_pipelineDescriptionIsValid = true;
 				AppPipelineSetLastFileNameInternal(NULL);
-				GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject);
+				if (GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject)) {
+					s_pipelineDescriptionIsValid = true;
+					AppPipelineInitPassFileStats(&s_pipelineDescriptionForProject);
+				} else {
+					s_pipelineDescriptionIsValid = false;
+					result = false;
+					AppErrorMessageBox(APP_NAME, "Failed to apply pipeline (fragment shader compile error).");
+				}
 			} else {
 				s_pipelineDescriptionIsValid = false;
 				AppPipelineSetLastFileNameInternal(NULL);
 				GraphicsApplyPipelineDescription(NULL);
+				AppPipelineResetPassFileStats();
 				if (errorMessage[0] != '\0') {
 					AppErrorMessageBox(APP_NAME, "Failed to load pipeline: %s", errorMessage);
 				} else {
@@ -1434,6 +1447,7 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 			s_pipelineDescriptionIsValid = false;
 			AppPipelineSetLastFileNameInternal(NULL);
 			GraphicsApplyPipelineDescription(NULL);
+			AppPipelineResetPassFileStats();
 		}
 	}
 	{
@@ -2147,6 +2161,65 @@ static void AppPipelineSetLastFileNameInternal(const char *fileName){
 	strlcpy(s_pipelineLastFileName, fileName, sizeof(s_pipelineLastFileName));
 }
 
+static bool AppIsAbsolutePath(const char *path){
+	if (path == NULL || path[0] == '\0') return false;
+	if (path[0] == '\\' || path[0] == '/') return true;
+	if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z'))
+	&&	path[1] == ':') {
+		return true;
+	}
+	return false;
+}
+
+static void AppResolvePipelineShaderPaths(PipelineDescription *pipeline, const char *basePath){
+	if (pipeline == NULL) return;
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		PipelinePass *pass = &pipeline->passes[passIndex];
+		pass->resolvedShaderPath[0] = '\0';
+		if (pass->shaderPath[0] == '\0') {
+			continue;
+		}
+		if (AppIsAbsolutePath(pass->shaderPath)) {
+			strlcpy(
+				pass->resolvedShaderPath,
+				pass->shaderPath,
+				sizeof(pass->resolvedShaderPath)
+			);
+		} else if (basePath != NULL && basePath[0] != '\0') {
+			GenerateCombinedPath(
+				/* char *combinedPath */				pass->resolvedShaderPath,
+				/* size_t combinedPathSizeInBytes */	sizeof(pass->resolvedShaderPath),
+				/* const char *directoryPath */			basePath,
+				/* const char *filePath */				pass->shaderPath
+			);
+		} else {
+			strlcpy(
+				pass->resolvedShaderPath,
+				pass->shaderPath,
+				sizeof(pass->resolvedShaderPath)
+			);
+		}
+	}
+}
+
+static void AppPipelineResetPassFileStats(){
+	for (int passIndex = 0; passIndex < PIPELINE_MAX_PASSES; ++passIndex) {
+		memset(&s_pipelinePassFileStat[passIndex], 0, sizeof(struct stat));
+	}
+}
+
+static void AppPipelineInitPassFileStats(const PipelineDescription *pipeline){
+	AppPipelineResetPassFileStats();
+	if (pipeline == NULL) return;
+	for (int passIndex = 0; passIndex < pipeline->numPasses && passIndex < PIPELINE_MAX_PASSES; ++passIndex) {
+		const PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->resolvedShaderPath[0] == '\0') {
+			continue;
+		}
+		stat(pass->resolvedShaderPath, &s_pipelinePassFileStat[passIndex]);
+	}
+}
+
 bool AppPipelineHasCustomDescription(){
 	return s_pipelineDescriptionIsValid;
 }
@@ -2162,7 +2235,36 @@ void AppPipelineClearDescription(){
 	PipelineDescriptionInit(&s_pipelineDescriptionForProject);
 	s_pipelineDescriptionIsValid = false;
 	AppPipelineSetLastFileNameInternal(NULL);
+	AppPipelineResetPassFileStats();
 	GraphicsApplyPipelineDescription(NULL);
+}
+
+static void AppPipelineHotReloadPassShaders(){
+	const PipelineDescription *pipeline = AppPipelineGetProjectDescription();
+	if (pipeline == NULL) return;
+
+	bool updated = false;
+	for (int passIndex = 0; passIndex < pipeline->numPasses && passIndex < PIPELINE_MAX_PASSES; ++passIndex) {
+		const PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->resolvedShaderPath[0] == '\0') {
+			continue;
+		}
+		if (IsValidFileName(pass->resolvedShaderPath) == false) {
+			continue;
+		}
+		if (IsFileUpdated(pass->resolvedShaderPath, &s_pipelinePassFileStat[passIndex])) {
+			updated = true;
+		}
+	}
+
+	if (updated) {
+		printf("update the pipeline fragment shader(s).\n");
+		if (!GraphicsReloadPipelineFragmentShaders()) {
+			AppErrorMessageBox(APP_NAME, "Failed to reload pipeline fragment shaders.");
+		} else {
+			AppPipelineInitPassFileStats(pipeline);
+		}
+	}
 }
 
 bool AppPipelineLoadFromFile(
@@ -2182,6 +2284,13 @@ bool AppPipelineLoadFromFile(
 		);
 		return false;
 	}
+
+	char pipelineBasePath[MAX_PATH] = {0};
+	SplitDirectoryPathFromFilePath(
+		pipelineBasePath,
+		sizeof(pipelineBasePath),
+		fileName
+	);
 
 	bool result = false;
 	char *text = MallocReadTextFile(fileName);
@@ -2237,14 +2346,26 @@ bool AppPipelineLoadFromFile(
 		goto Cleanup;
 	}
 
+	AppResolvePipelineShaderPaths(&pipeline, pipelineBasePath);
 	s_pipelineDescriptionForProject = pipeline;
-	s_pipelineDescriptionIsValid = true;
 	AppPipelineSetLastFileNameInternal(fileName);
-	if (stat(fileName, &s_pipelineFileStat) != 0) {
-		memset(&s_pipelineFileStat, 0, sizeof(s_pipelineFileStat));
+	if (GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject)) {
+		s_pipelineDescriptionIsValid = true;
+		AppPipelineInitPassFileStats(&s_pipelineDescriptionForProject);
+		if (stat(fileName, &s_pipelineFileStat) != 0) {
+			memset(&s_pipelineFileStat, 0, sizeof(s_pipelineFileStat));
+		}
+		result = true;
+	} else {
+		s_pipelineDescriptionIsValid = false;
+		AppPipelineResetPassFileStats();
+		AppPipelineSetErrorMessage(
+			errorMessage,
+			errorMessageSizeInBytes,
+			"Failed to apply pipeline (fragment shader compile error)."
+		);
+		result = false;
 	}
-	GraphicsApplyPipelineDescription(&s_pipelineDescriptionForProject);
-	result = true;
 
 Cleanup:
 	if (jsonRoot != NULL) {
@@ -2686,6 +2807,9 @@ if (pipelineFileName != NULL
 		}
 	}
 }
+
+/* パイプラインパスのフラグメントシェーダ更新 */
+AppPipelineHotReloadPassShaders();
 
 /* サウンドシェーダの更新 */
 if (IsValidFileName(s_soundShaderFileName)) {

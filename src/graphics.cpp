@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 #include <limits.h>
+#include <string>
 #include "common.h"
 #include "app.h"
 #include "graphics.h"
@@ -166,7 +167,8 @@ static bool GraphicsExecuteFragmentPassPipeline(
 	if (pipeline == NULL || pass == NULL || params == NULL || settings == NULL) {
 		return false;
 	}
-	if (s_fragmentShaderId == 0 || s_shaderPipelineId == 0) {
+	GLuint fragmentProgramId = (pass->programId != 0) ? pass->programId : s_fragmentShaderId;
+	if (s_shaderPipelineId == 0 || fragmentProgramId == 0) {
 		return false;
 	}
 
@@ -248,6 +250,7 @@ static bool GraphicsExecuteFragmentPassPipeline(
 
 	/* Bind shader pipeline */
 	glBindProgramPipeline(s_shaderPipelineId);
+	glUseProgramStages(s_shaderPipelineId, GL_FRAGMENT_SHADER_BIT, fragmentProgramId);
 
 	/* Bind sampled inputs */
 	GLuint samplerBaseUnit = 0;
@@ -339,34 +342,34 @@ static bool GraphicsExecuteFragmentPassPipeline(
 	);
 
 	/* Upload uniforms */
-	glUseProgram(s_fragmentShaderId);
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
+	glUseProgram(fragmentProgramId);
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
 		glUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
 		glUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, params->waveOutPos);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
 		glUniform1i(UNIFORM_LOCATION_FRAME_COUNT, params->frameCount);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_TIME, GL_FLOAT)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_TIME, GL_FLOAT)) {
 		glUniform1f(UNIFORM_LOCATION_TIME, params->time);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_RESO, GL_FLOAT_VEC2)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_RESO, GL_FLOAT_VEC2)) {
 		glUniform2f(
 			UNIFORM_LOCATION_RESO,
 			(GLfloat)targetWidth,
 			(GLfloat)targetHeight
 		);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_MOUSE_POS, GL_FLOAT_VEC2)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_MOUSE_POS, GL_FLOAT_VEC2)) {
 		glUniform2f(
 			UNIFORM_LOCATION_MOUSE_POS,
 			(GLfloat)params->xMouse / (GLfloat)targetWidth,
 			1.0f - (GLfloat)params->yMouse / (GLfloat)targetHeight
 		);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_MOUSE_BUTTONS, GL_INT_VEC3)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_MOUSE_BUTTONS, GL_INT_VEC3)) {
 		glUniform3i(
 			UNIFORM_LOCATION_MOUSE_BUTTONS,
 			params->mouseLButtonPressed,
@@ -374,10 +377,10 @@ static bool GraphicsExecuteFragmentPassPipeline(
 			params->mouseRButtonPressed
 		);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_TAN_FOVY, GL_FLOAT)) {
 		glUniform1f(UNIFORM_LOCATION_TAN_FOVY, tanf(params->fovYInRadians));
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_CAMERA_COORD, GL_FLOAT_MAT4)) {
 		glUniformMatrix4fv(
 			UNIFORM_LOCATION_CAMERA_COORD,
 			1,
@@ -385,7 +388,7 @@ static bool GraphicsExecuteFragmentPassPipeline(
 			&params->mat4x4CameraInWorld[0][0]
 		);
 	}
-	if (ExistsShaderUniform(s_fragmentShaderId, UNIFORM_LOCATION_PREV_CAMERA_COORD, GL_FLOAT_MAT4)) {
+	if (ExistsShaderUniform(fragmentProgramId, UNIFORM_LOCATION_PREV_CAMERA_COORD, GL_FLOAT_MAT4)) {
 		glUniformMatrix4fv(
 			UNIFORM_LOCATION_PREV_CAMERA_COORD,
 			1,
@@ -1614,8 +1617,90 @@ static bool GraphicsExecuteComputePassPipeline(
 
 	return true;
 }
+
+static void GraphicsDeletePipelinePassPrograms(PipelineDescription *pipeline){
+	if (pipeline == NULL) return;
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->programId != 0) {
+			glDeleteProgram(pass->programId);
+			pass->programId = 0;
+		}
+	}
+}
+
+static bool GraphicsCompileFragmentProgramsForPipeline(PipelineDescription *pipeline){
+	if (pipeline == NULL) return false;
+
+	GLuint newPrograms[PIPELINE_MAX_PASSES] = {0};
+
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->type != PipelinePassTypeFragment) {
+			continue;
+		}
+		const char *shaderPath = (pass->resolvedShaderPath[0] != '\0')
+			? pass->resolvedShaderPath
+			: pass->shaderPath;
+		if (shaderPath == NULL || shaderPath[0] == '\0') {
+			continue;
+		}
+
+		std::string expandedSource;
+		std::string errorMessage;
+		if (!ExpandShaderIncludes(shaderPath, expandedSource, &errorMessage)) {
+			printf(
+				"Failed to load fragment shader for pass \"%s\" (%s): %s\n",
+				pass->name,
+				shaderPath,
+				(errorMessage.empty() ? "include expansion failed" : errorMessage.c_str())
+			);
+			goto Fail;
+		}
+
+		const GLchar *(strings[]) = {
+			SkipBomConst(expandedSource.c_str())
+		};
+
+		GLuint programId = CreateShader(GL_FRAGMENT_SHADER, SIZE_OF_ARRAY(strings), strings);
+		if (programId == 0) {
+			printf(
+				"Failed to compile fragment shader for pass \"%s\" (%s).\n",
+				pass->name,
+				shaderPath
+			);
+			goto Fail;
+		}
+
+		newPrograms[passIndex] = programId;
+	}
+
+	/* swap in new programs */
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		if (newPrograms[passIndex] != 0) {
+			PipelinePass *pass = &pipeline->passes[passIndex];
+			if (pass->programId != 0) {
+				glDeleteProgram(pass->programId);
+			}
+			pass->programId = newPrograms[passIndex];
+			newPrograms[passIndex] = 0;
+		}
+	}
+	return true;
+
+Fail:
+	for (int passIndex = 0; passIndex < PIPELINE_MAX_PASSES; ++passIndex) {
+		if (newPrograms[passIndex] != 0) {
+			glDeleteProgram(newPrograms[passIndex]);
+			newPrograms[passIndex] = 0;
+		}
+	}
+	return false;
+}
 void GraphicsResetPipelineDescriptionToDefault(){
 	GraphicsResetPipelineRuntimeResources();
+	GraphicsDeletePipelinePassPrograms(&s_pipelineDescription);
+	GraphicsResetPipelinePassExecutionState();
 	PipelineDescriptionInit(&s_pipelineDescription);
 	s_pipelineHasCustomDescription = false;
 }
@@ -1626,9 +1711,19 @@ bool GraphicsApplyPipelineDescription(const PipelineDescription *pipeline){
 		return true;
 	}
 	GraphicsResetPipelineRuntimeResources();
+	GraphicsDeletePipelinePassPrograms(&s_pipelineDescription);
+	GraphicsResetPipelinePassExecutionState();
 	memcpy(&s_pipelineDescription, pipeline, sizeof(PipelineDescription));
+	if (!GraphicsCompileFragmentProgramsForPipeline(&s_pipelineDescription)) {
+		GraphicsResetPipelineDescriptionToDefault();
+		return false;
+	}
 	s_pipelineHasCustomDescription = true;
 	return true;
+}
+
+bool GraphicsReloadPipelineFragmentShaders(void){
+	return GraphicsCompileFragmentProgramsForPipeline(&s_pipelineDescription);
 }
 
 bool GraphicsHasCustomPipelineDescription(){

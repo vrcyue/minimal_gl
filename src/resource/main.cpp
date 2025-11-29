@@ -155,6 +155,7 @@ typedef struct {
 	PipelinePassType type;
 	PipelinePassExecution execution;
 	char shaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
+	char resolvedShaderPath[PIPELINE_MAX_SHADER_PATH_LENGTH];
 	GLuint programId;
 	PipelineResourceBinding inputs[PIPELINE_MAX_BINDINGS_PER_PASS];
 	int numInputs;
@@ -193,12 +194,6 @@ static PipelineDescription s_pipelineDescription = {0};
 static PipelineRuntimeResourceState s_pipelineRuntimeResources[PIPELINE_MAX_RESOURCES] = {{0}};
 static bool s_pipelinePassExecuted[PIPELINE_MAX_PASSES] = {0};
 static int s_activePipelinePassIndex = -1;
-static bool s_fragmentPipelinePassUniformAvailable = false;
-static bool s_fragmentWaveOutUniformAvailable = false;
-static bool s_fragmentFrameCountUniformAvailable = false;
-static bool s_fragmentTimeUniformAvailable = false;
-static bool s_fragmentResolutionUniformAvailable = false;
-static bool s_fragmentMouseButtonsUniformAvailable = false;
 static bool s_computePipelinePassUniformAvailable = false;
 static bool s_computeFrameCountUniformAvailable = false;
 static bool s_computeWaveOutUniformAvailable = false;
@@ -206,6 +201,7 @@ static bool s_computeTimeUniformAvailable = false;
 static bool s_computeResolutionUniformAvailable = false;
 static bool s_computeMouseButtonsUniformAvailable = false;
 static bool s_loggedPipelineExecutionFailure = false;
+static const char *s_exportedFragmentShaderSource = NULL;
 
 /*=============================================================================
 ▼	各種リソースの取り込み
@@ -323,6 +319,56 @@ static bool PipelineProgramHasUniform(
 		}
 	}
 	return false;
+}
+
+static void PipelineDeleteFragmentPrograms(PipelineDescription *pipeline){
+	if (pipeline == NULL) return;
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->programId != 0) {
+			glExtDeleteProgram(pass->programId);
+			pass->programId = 0;
+		}
+	}
+}
+
+static bool PipelineCompileFragmentPrograms(
+	PipelineDescription *pipeline,
+	const char *defaultFragmentSource
+){
+	if (pipeline == NULL) return false;
+
+	/* reset program IDs */
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		pipeline->passes[passIndex].programId = 0;
+	}
+
+	for (int passIndex = 0; passIndex < pipeline->numPasses; ++passIndex) {
+		PipelinePass *pass = &pipeline->passes[passIndex];
+		if (pass->type != PipelinePassTypeFragment) {
+			continue;
+		}
+
+		/* 現状、エクスポートされた実行ファイルには単一のフラグメントシェーダ文字列のみが埋め込まれている */
+		const char *source = defaultFragmentSource;
+		if (source == NULL || source[0] == '\0') {
+			PipelineDeleteFragmentPrograms(pipeline);
+			return false;
+		}
+
+		GLuint programId = glExtCreateShaderProgramv(
+			/* GLenum type */				GL_FRAGMENT_SHADER,
+			/* GLsizei count */			1,
+			/* const GLchar* const *strings */	&source
+		);
+		if (programId == 0) {
+			PipelineDeleteFragmentPrograms(pipeline);
+			return false;
+		}
+		pass->programId = programId;
+	}
+
+	return true;
 }
 
 static void PipelineDeleteRuntimeResource(PipelineRuntimeResourceState *state){
@@ -957,7 +1003,7 @@ static bool PipelineExecuteFragmentPass(
 	if (fragmentProgramId == 0) return false;
 
 	glExtUseProgram(fragmentProgramId);
-	if (s_fragmentPipelinePassUniformAvailable) {
+	if (PipelineProgramHasUniform(fragmentProgramId, UNIFORM_LOCATION_PIPELINE_PASS_INDEX, GL_INT)) {
 		glExtUniform1i(UNIFORM_LOCATION_PIPELINE_PASS_INDEX, s_activePipelinePassIndex);
 	}
 
@@ -1056,28 +1102,28 @@ static bool PipelineExecuteFragmentPass(
 		if (samplerUnit >= PIPELINE_MAX_BINDINGS_PER_PASS) {
 			samplerUnit = (GLuint)(PIPELINE_MAX_BINDINGS_PER_PASS - 1);
 		}
-		glExtActiveTexture(GL_TEXTURE0 + samplerUnit);
-		glBindTexture(GL_TEXTURE_2D, textureId);
-		PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
-		if (samplerUnit >= numBoundSamplerUnits) {
-			samplerUnits[numBoundSamplerUnits++] = samplerUnit;
-		}
+	glExtActiveTexture(GL_TEXTURE0 + samplerUnit);
+	glBindTexture(GL_TEXTURE_2D, textureId);
+	PipelineSetTextureSampler(GL_TEXTURE_2D, resource->textureFilter, resource->textureWrap, false);
+	if (samplerUnit >= numBoundSamplerUnits) {
+		samplerUnits[numBoundSamplerUnits++] = samplerUnit;
 	}
-	glExtActiveTexture(GL_TEXTURE0);
+}
+glExtActiveTexture(GL_TEXTURE0);
 
-	if (s_fragmentWaveOutUniformAvailable) {
+	if (PipelineProgramHasUniform(fragmentProgramId, UNIFORM_LOCATION_WAVE_OUT_POS, GL_INT)) {
 		glExtUniform1i(UNIFORM_LOCATION_WAVE_OUT_POS, waveOutPos);
 	}
-	if (s_fragmentFrameCountUniformAvailable) {
+	if (enableFrameCountUniform && PipelineProgramHasUniform(fragmentProgramId, UNIFORM_LOCATION_FRAME_COUNT, GL_INT)) {
 		glExtUniform1i(UNIFORM_LOCATION_FRAME_COUNT, frameCount);
 	}
-	if (s_fragmentTimeUniformAvailable) {
+	if (PipelineProgramHasUniform(fragmentProgramId, UNIFORM_LOCATION_TIME, GL_FLOAT)) {
 		glExtUniform1f(UNIFORM_LOCATION_TIME, timeInSeconds);
 	}
-	if (s_fragmentResolutionUniformAvailable) {
+	if (PipelineProgramHasUniform(fragmentProgramId, UNIFORM_LOCATION_RESO, GL_FLOAT_VEC2)) {
 		glExtUniform2f(UNIFORM_LOCATION_RESO, (float)targetWidth, (float)targetHeight);
 	}
-	if (s_fragmentMouseButtonsUniformAvailable) {
+	if (PipelineProgramHasUniform(fragmentProgramId, UNIFORM_LOCATION_MOUSE_BUTTONS, GL_INT_VEC3)) {
 		glExtUniform3i(UNIFORM_LOCATION_MOUSE_BUTTONS, 0, 0, 0);
 	}
 
@@ -1378,6 +1424,7 @@ entrypoint(
 	/* フラグメントシェーダのポインタ配列 */
 	const char *graphicsFragmentShaderCode = p;
 	const char *graphicsFragmentShaderCodes[] = {graphicsFragmentShaderCode};
+	s_exportedFragmentShaderSource = graphicsFragmentShaderCode;
 
 	/* コンピュートシェーダコードの開始位置を検索 */
 	while (*p != '\0') { p++; }
@@ -1532,6 +1579,8 @@ entrypoint(
 		s_computeMouseButtonsUniformAvailable = false;
 	}
 
+	PipelineMemcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));
+
 	/* フラグメントシェーダの作成 */
 	int graphicsFsProgramId = glExtCreateShaderProgramv(
 		/* GLenum type */				GL_FRAGMENT_SHADER,
@@ -1543,47 +1592,10 @@ entrypoint(
 	glExtUseProgram(
 		/* GLuint program */	graphicsFsProgramId
 	);
-	if (graphicsFsProgramId != 0) {
-		s_fragmentPipelinePassUniformAvailable = PipelineProgramHasUniform(
-			graphicsFsProgramId,
-			UNIFORM_LOCATION_PIPELINE_PASS_INDEX,
-			GL_INT
-		);
-		s_fragmentWaveOutUniformAvailable = PipelineProgramHasUniform(
-			graphicsFsProgramId,
-			UNIFORM_LOCATION_WAVE_OUT_POS,
-			GL_INT
-		);
-		s_fragmentFrameCountUniformAvailable = PipelineProgramHasUniform(
-			graphicsFsProgramId,
-			UNIFORM_LOCATION_FRAME_COUNT,
-			GL_INT
-		);
-		s_fragmentTimeUniformAvailable = PipelineProgramHasUniform(
-			graphicsFsProgramId,
-			UNIFORM_LOCATION_TIME,
-			GL_FLOAT
-		);
-		s_fragmentResolutionUniformAvailable = PipelineProgramHasUniform(
-			graphicsFsProgramId,
-			UNIFORM_LOCATION_RESO,
-			GL_FLOAT_VEC2
-		);
-		s_fragmentMouseButtonsUniformAvailable = PipelineProgramHasUniform(
-			graphicsFsProgramId,
-			UNIFORM_LOCATION_MOUSE_BUTTONS,
-			GL_INT_VEC3
-		);
-	} else {
-		s_fragmentPipelinePassUniformAvailable = false;
-		s_fragmentWaveOutUniformAvailable = false;
-		s_fragmentFrameCountUniformAvailable = false;
-		s_fragmentTimeUniformAvailable = false;
-		s_fragmentResolutionUniformAvailable = false;
-		s_fragmentMouseButtonsUniformAvailable = false;
+	if (!PipelineCompileFragmentPrograms(&s_pipelineDescription, s_exportedFragmentShaderSource)) {
+		graphicsFsProgramId = 0;
 	}
 
-	PipelineMemcpy(&s_pipelineDescription, &g_exportedPipelineDescription, sizeof(PipelineDescription));
 	PipelineResetRuntimeResources();
 	PipelineEnsureResources(&s_pipelineDescription);
 
@@ -1633,7 +1645,8 @@ entrypoint(
 					executed = PipelineExecuteComputePass(&s_pipelineDescription, pass, frameCount, waveOutPos, timeInSeconds);
 				} break;
 				case PipelinePassTypeFragment: {
-					executed = PipelineExecuteFragmentPass(&s_pipelineDescription, pass, frameCount, waveOutPos, timeInSeconds, graphicsFsProgramId, enableFrameCountUniform);
+					GLuint fragmentProgramId = (pass->programId != 0) ? pass->programId : graphicsFsProgramId;
+					executed = PipelineExecuteFragmentPass(&s_pipelineDescription, pass, frameCount, waveOutPos, timeInSeconds, fragmentProgramId, enableFrameCountUniform);
 				} break;
 				case PipelinePassTypePresent: {
 					executed = PipelineExecutePresentPass(&s_pipelineDescription, pass, frameCount);
@@ -1688,12 +1701,6 @@ entrypoint(
 		s_computeResolutionUniformAvailable = false;
 		s_computeMouseButtonsUniformAvailable = false;
 	}
-	s_fragmentPipelinePassUniformAvailable = false;
-	s_fragmentWaveOutUniformAvailable = false;
-	s_fragmentFrameCountUniformAvailable = false;
-	s_fragmentTimeUniformAvailable = false;
-	s_fragmentResolutionUniformAvailable = false;
-	s_fragmentMouseButtonsUniformAvailable = false;
 	PipelineResetRuntimeResources();
 
 	/* デモを終了する */
