@@ -6,6 +6,12 @@
 #include "dialog_confirm_over_write.h"
 #include "export_executable.h"
 #include "pipeline_description.h"
+#include "package.h"
+
+#include <string>
+#include <cctype>
+#include <unordered_set>
+#include <vector>
 
 
 #define USE_MAIN_CPP	1
@@ -1274,228 +1280,228 @@ bool ExportExecutable(
 	const RenderSettings *renderSettings,
 	const ExecutableExportSettings *executableExportSettings
 ){
-	/* テンポラリディレクトリのパスを取得 */
-	char tempPathName[MAX_PATH];
-	{
-		int ret = GetTempPathA(sizeof(tempPathName), tempPathName);
-		if (ret == 0) {
-			AppErrorMessageBox(APP_NAME, "Failed to get temp path.");
+	(void)graphicsShaderCode;
+	(void)computeShaderCode;
+	(void)soundShaderCode;
+	(void)renderSettings;
+
+	if (executableExportSettings == NULL || executableExportSettings->fileName[0] == '\0') {
+		AppErrorMessageBox(APP_NAME, "Output file name is empty.");
+		return false;
+	}
+
+	char selfPath[MAX_PATH] = {0};
+	if (GetModuleFileName(NULL, selfPath, sizeof(selfPath)) == 0) {
+		AppErrorMessageBox(APP_NAME, "Failed to resolve the current executable path.");
+		return false;
+	}
+
+	char outputDir[MAX_PATH] = {0};
+	SplitDirectoryPathFromFilePath(outputDir, sizeof(outputDir), executableExportSettings->fileName);
+	if (outputDir[0] != '\0') {
+		int mkdirRet = SHCreateDirectoryExA(NULL, outputDir, NULL);
+		if (mkdirRet != ERROR_SUCCESS && mkdirRet != ERROR_ALREADY_EXISTS) {
+			AppLastErrorMessageBox(APP_NAME);
 			return false;
 		}
 	}
-
-	/* 作業ディレクトリのパスを生成 */
-	char workDirName[MAX_PATH];
-	{
-		int ret = GetTempFileName(
-			/* LPCTSTR lpPathName */		tempPathName,
-			/* LPCTSTR lpPrefixString */	"mgl",
-			/* UINT uUnique */				1,
-			/* LPTSTR lpTempFileName */		workDirName
-		);
-		if (ret == 0) {
-			AppErrorMessageBox(APP_NAME, "Failed to get a work dir name.");
-			return false;
-		}
-	}
-
-	/* 作業ディレクトリを生成 */
-	if (ForceCreateDirectory(workDirName) == false) return false;
-
-#if USE_MAIN_CPP
-	/* システムヘッダディレクトリの作成 */
-	char glDirName[MAX_PATH];
-	char khrDirName[MAX_PATH];
-	{
-		snprintf(glDirName, sizeof(glDirName), "%s\\GL", workDirName);
-		printf("create directory %s.\n", glDirName);
-		if (ForceCreateDirectory(glDirName) == false) return false;
-	}
-	{
-		snprintf(khrDirName, sizeof(khrDirName), "%s\\KHR", workDirName);
-		printf("create directory %s.\n", khrDirName);
-		if (ForceCreateDirectory(khrDirName) == false) return false;
-	}
-#endif
-
-	/* 旧ファイルサイズを確認 */
-	size_t prevExeFileSize = GetFileSize(executableExportSettings->fileName);
-
-	/* 各種ファイル名生成 */
-#if USE_MAIN_CPP
-	char mainCppFullPath[MAX_PATH] = {0};
-	char glextHeaderFullPath[MAX_PATH] = {0};
-	char khrplatformHeaderFullPath[MAX_PATH] = {0};
-#else
-	char mainAsmFullPath[MAX_PATH] = {0};
-#endif
-	char mainObjFullPath[MAX_PATH] = {0};
-	char configHeaderFullPath[MAX_PATH] = {0};
-	char resourceCppFullPath[MAX_PATH] = {0};
-	char resourceObjFullPath[MAX_PATH] = {0};
-	char graphicsFragmentShaderGlslFullPath[MAX_PATH] = {0};
-	char graphicsFragmentShaderTmpFullPath[MAX_PATH] = {0};
-	char graphicsFragmentShaderInlFullPath[MAX_PATH] = {0};
-	char graphicsComputeShaderGlslFullPath[MAX_PATH] = {0};
-	char graphicsComputeShaderTmpFullPath[MAX_PATH] = {0};
-	char graphicsComputeShaderInlFullPath[MAX_PATH] = {0};
-	char soundComputeShaderGlslFullPath[MAX_PATH] = {0};
-	char soundComputeShaderTmpFullPath[MAX_PATH] = {0};
-	char soundComputeShaderInlFullPath[MAX_PATH] = {0};
-	char pipelineDescriptionInlFullPath[MAX_PATH] = {0};
-	char crinklerReportFullPath[MAX_PATH] = {0};
-	char crinklerReuseFullPath[MAX_PATH] = {0};
-	char minifyBatFullPath[MAX_PATH] = {0};
-	char buildBatFullPath[MAX_PATH] = {0};
-	char outputGraphicsFragmentShaderInlFullPath[MAX_PATH] = {0};
-	char outputGraphicsComputeShaderInlFullPath[MAX_PATH] = {0};
-	char outputSoundComputeShaderInlFullPath[MAX_PATH] = {0};
-	char outputPipelineDescriptionInlFullPath[MAX_PATH] = {0};
-#if USE_MAIN_CPP
-	snprintf(mainCppFullPath, sizeof(mainCppFullPath), "%s\\main.cpp", workDirName);
-	snprintf(glextHeaderFullPath, sizeof(glextHeaderFullPath), "%s\\GL\\glext.h", workDirName);
-	snprintf(khrplatformHeaderFullPath, sizeof(khrplatformHeaderFullPath), "%s\\KHR\\khrplatform.h", workDirName);
-#else
-	snprintf(mainAsmFullPath, sizeof(mainAsmFullPath), "%s\\main.asm", workDirName);
-#endif
-	snprintf(mainObjFullPath, sizeof(mainObjFullPath), "%s\\main.obj", workDirName);
-	snprintf(configHeaderFullPath, sizeof(configHeaderFullPath), "%s\\config.h", workDirName);
-	snprintf(resourceCppFullPath, sizeof(resourceCppFullPath), "%s\\resource.cpp", workDirName);
-	snprintf(resourceObjFullPath, sizeof(resourceObjFullPath), "%s\\resource.obj", workDirName);
-	snprintf(graphicsFragmentShaderGlslFullPath, sizeof(graphicsFragmentShaderGlslFullPath), "%s\\graphics_fragment_shader.glsl", workDirName);
-	snprintf(graphicsFragmentShaderTmpFullPath,  sizeof(graphicsFragmentShaderTmpFullPath),  "%s\\graphics_fragment_shader.i",  workDirName);
-	snprintf(graphicsFragmentShaderInlFullPath,  sizeof(graphicsFragmentShaderInlFullPath),  "%s\\graphics_fragment_shader.inl",  workDirName);
-	snprintf(graphicsComputeShaderGlslFullPath, sizeof(graphicsComputeShaderGlslFullPath), "%s\\graphics_compute_shader.glsl", workDirName);
-	snprintf(graphicsComputeShaderTmpFullPath,  sizeof(graphicsComputeShaderTmpFullPath),  "%s\\graphics_compute_shader.i",  workDirName);
-	snprintf(graphicsComputeShaderInlFullPath,  sizeof(graphicsComputeShaderInlFullPath),  "%s\\graphics_compute_shader.inl",  workDirName);
-	snprintf(soundComputeShaderGlslFullPath, sizeof(soundComputeShaderGlslFullPath), "%s\\sound_compute_shader.glsl", workDirName);
-	snprintf(soundComputeShaderTmpFullPath,  sizeof(soundComputeShaderTmpFullPath),  "%s\\sound_compute_shader.i",  workDirName);
-	snprintf(soundComputeShaderInlFullPath,  sizeof(soundComputeShaderInlFullPath),  "%s\\sound_compute_shader.inl",  workDirName);
-	snprintf(pipelineDescriptionInlFullPath, sizeof(pipelineDescriptionInlFullPath), "%s\\pipeline_description.inl", workDirName);
-	snprintf(crinklerReportFullPath, sizeof(crinklerReportFullPath), "%s.crinkler_report.html", executableExportSettings->fileName);
-	snprintf(crinklerReuseFullPath, sizeof(crinklerReuseFullPath), "%s.crinkler_reuse.txt", executableExportSettings->fileName);
-	snprintf(minifyBatFullPath, sizeof(minifyBatFullPath), "%s\\minify.bat", workDirName);
-	snprintf(buildBatFullPath, sizeof(buildBatFullPath), "%s\\build.bat", workDirName);
-	snprintf(outputGraphicsFragmentShaderInlFullPath, sizeof(outputGraphicsFragmentShaderInlFullPath), "%s.gfx.inl", executableExportSettings->fileName);
-	snprintf(outputGraphicsComputeShaderInlFullPath, sizeof(outputGraphicsComputeShaderInlFullPath), "%s.cmp.inl", executableExportSettings->fileName);
-	snprintf(outputSoundComputeShaderInlFullPath, sizeof(outputSoundComputeShaderInlFullPath), "%s.snd.inl", executableExportSettings->fileName);
-	snprintf(outputPipelineDescriptionInlFullPath, sizeof(outputPipelineDescriptionInlFullPath), "%s.pipeline.inl", executableExportSettings->fileName);
 
 	/* 上書き確認 */
-	if (DialogConfirmOverWrite(executableExportSettings->fileName) == DialogConfirmOverWriteResult_Canceled
-	||	DialogConfirmOverWrite(crinklerReportFullPath) == DialogConfirmOverWriteResult_Canceled
-	||	DialogConfirmOverWrite(crinklerReuseFullPath) == DialogConfirmOverWriteResult_Canceled
-	||	DialogConfirmOverWrite(outputGraphicsFragmentShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
-	||	DialogConfirmOverWrite(outputGraphicsComputeShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
-	||	DialogConfirmOverWrite(outputSoundComputeShaderInlFullPath) == DialogConfirmOverWriteResult_Canceled
-	||	DialogConfirmOverWrite(outputPipelineDescriptionInlFullPath) == DialogConfirmOverWriteResult_Canceled
-	) {
+	if (DialogConfirmOverWrite(executableExportSettings->fileName) == DialogConfirmOverWriteResult_Canceled) {
 		return false;
 	}
 
-	/* エラー処理の都合、下請け関数に丸投げ */
-	bool ret = ExportExecutableSub(
-		workDirName,
-		graphicsShaderCode,
-		computeShaderCode,
-		soundShaderCode,
-#if USE_MAIN_CPP
-		mainCppFullPath,
-		glextHeaderFullPath,
-		khrplatformHeaderFullPath,
-#else
-		mainAsmFullPath,
-#endif
-		mainObjFullPath,
-		configHeaderFullPath,
-		resourceCppFullPath,
-		resourceObjFullPath,
-		graphicsFragmentShaderGlslFullPath,
-		graphicsFragmentShaderTmpFullPath,
-		graphicsFragmentShaderInlFullPath,
-		graphicsComputeShaderGlslFullPath,
-		graphicsComputeShaderTmpFullPath,
-		graphicsComputeShaderInlFullPath,
-		soundComputeShaderGlslFullPath,
-		soundComputeShaderTmpFullPath,
-		soundComputeShaderInlFullPath,
-		pipelineDescriptionInlFullPath,
-		crinklerReportFullPath,
-		crinklerReuseFullPath,
-		minifyBatFullPath,
-		buildBatFullPath,
-		outputGraphicsFragmentShaderInlFullPath,
-		outputGraphicsComputeShaderInlFullPath,
-		outputSoundComputeShaderInlFullPath,
-		outputPipelineDescriptionInlFullPath,
-		renderSettings,
-		executableExportSettings
-	);
-
-	/* 完了の通知 */
-	if (ret) {
-		size_t exeFileSize = GetFileSize(executableExportSettings->fileName);
-		int exeFileSizeDiff = (int)(exeFileSize - prevExeFileSize);
-		AppMessageBox(
-			APP_NAME, "Export executable file completed successfully.\n\nFile size = %d bytes. (change %+d bytes)\n\n",
-			(int)exeFileSize, exeFileSizeDiff
-		);
+	/* プロジェクトベースパスを決定 */
+	char projectBasePath[MAX_PATH] = {0};
+	if (AppProjectGetCurrentFileName() != NULL && AppProjectGetCurrentFileName()[0] != '\0') {
+		SplitDirectoryPathFromFilePath(projectBasePath, sizeof(projectBasePath), AppProjectGetCurrentFileName());
 	} else {
-		AppErrorMessageBox(APP_NAME, "Failed to export executable file.");
+		AppGetDefaultDirectoryName(projectBasePath, sizeof(projectBasePath));
+	}
+	if (projectBasePath[0] == '\0') {
+		GetCurrentDirectoryA(sizeof(projectBasePath), projectBasePath);
 	}
 
-	/* テンポラリファイル群の除去 */
-	remove(buildBatFullPath);
-	remove(configHeaderFullPath);
-	remove(graphicsFragmentShaderGlslFullPath);
-	remove(graphicsFragmentShaderTmpFullPath);
-	remove(graphicsFragmentShaderInlFullPath);
-	remove(graphicsComputeShaderGlslFullPath);
-	remove(graphicsComputeShaderTmpFullPath);
-	remove(graphicsComputeShaderInlFullPath);
-#if USE_MAIN_CPP
-	remove(mainCppFullPath);
-	remove(glextHeaderFullPath);
-	remove(khrplatformHeaderFullPath);
-#else
-	remove(mainAsmFullPath);
-#endif
-	remove(mainObjFullPath);
-	remove(minifyBatFullPath);
-	remove(resourceCppFullPath);
-	remove(resourceObjFullPath);
-	remove(soundComputeShaderGlslFullPath);
-	remove(soundComputeShaderTmpFullPath);
-	remove(soundComputeShaderInlFullPath);
-#if USE_MAIN_CPP
-	if (RemoveDirectory(glDirName) == FALSE) {
-		AppLastErrorMessageBox(APP_NAME);
-		return false;
+	/* パイプラインのパスをパッケージ用に調整 */
+	PipelineDescription pipelineCopy = {{0}};
+	const PipelineDescription *pipelineOverride = NULL;
+	if (AppPipelineBuildPackagedCopy(&pipelineCopy, projectBasePath)) {
+		pipelineOverride = &pipelineCopy;
 	}
-	if (RemoveDirectory(khrDirName) == FALSE) {
-		AppLastErrorMessageBox(APP_NAME);
-		return false;
-	}
-#endif
 
-/*
-	exe export ファイル名に .\hoge.exe のような相対ファイル名を指定すると、
-	テンポラリディレクトリ上に exe 関連ファイルが出力され、ゴミファイルとして
-	残ってしまう。
-	いったんゴミファイルが生成されると、以降テンポラリディレクトリの削除に
-	毎回失敗することになり、その都度メッセージボックスを表示すると、
-	ユーザーを混乱させてしまう。
-	テンポラリディレクトリ上のファイルとは言え、ゴミファイルかどうかの判別は
-	難しいので、下手に削除することもできない。
-	テンポラリディレクトリの完全除去は無理に行わなくとも実害はないので、
-	以下の処理自体をコメントアウトしている。
-*/
-#if 0
-	/* テンポラリディレクトリの完全除去 */
-	if (RemoveDirectory(workDirName) == FALSE) {
+	struct SourceFileEntry {
+		std::string sourcePath;
+		std::string relativePath;
+	};
+	std::vector<SourceFileEntry> sourceFiles;
+	std::unordered_set<std::string> seenPaths;
+
+	auto normalizePath = [](const char *path)->std::string{
+		if (path == NULL) return std::string();
+		char buffer[MAX_PATH] = {0};
+		std::string result;
+		if (_fullpath(buffer, path, MAX_PATH) != NULL) {
+			result = buffer;
+		} else {
+			result = path;
+		}
+		for (char &ch : result) {
+			ch = (char)std::tolower((unsigned char)ch);
+		}
+		return result;
+	};
+
+	auto appendFile = [&](const char *sourcePath, const char *relativePath)->bool{
+		if (sourcePath == NULL || sourcePath[0] == '\0') return true;
+		if (relativePath == NULL || relativePath[0] == '\0') return true;
+		if (IsValidFileName(sourcePath) == false) {
+			AppErrorMessageBox(APP_NAME, "File not found: %s.", sourcePath);
+			return false;
+		}
+		std::string key = normalizePath(sourcePath);
+		if (seenPaths.find(key) != seenPaths.end()) {
+			return true;
+		}
+		seenPaths.insert(key);
+		sourceFiles.push_back({sourcePath, relativePath});
+		return true;
+	};
+
+	auto appendShaderWithIncludes = [&](const char *path)->bool{
+		char relative[MAX_PATH] = {0};
+		if (path != NULL && path[0] != '\0') {
+			GenerateRelativePathFromDirectoryToFile(relative, sizeof(relative), projectBasePath, path);
+			if (relative[0] == '\0') {
+				strlcpy(relative, path, sizeof(relative));
+			}
+		}
+		if (appendFile(path, relative) == false) return false;
+
+		if (path != NULL && path[0] != '\0') {
+			std::string expanded;
+			std::vector<std::string> includes;
+			std::string errorMessage;
+			if (ExpandShaderIncludes(path, expanded, includes, &errorMessage)) {
+				for (const std::string &inc : includes) {
+					char incRelative[MAX_PATH] = {0};
+					GenerateRelativePathFromDirectoryToFile(incRelative, sizeof(incRelative), projectBasePath, inc.c_str());
+					if (incRelative[0] == '\0') {
+						strlcpy(incRelative, inc.c_str(), sizeof(incRelative));
+					}
+					if (appendFile(inc.c_str(), incRelative) == false) return false;
+				}
+			} else if (!errorMessage.empty()) {
+				AppErrorMessageBox(APP_NAME, "Failed to expand includes: %s", errorMessage.c_str());
+				return false;
+			}
+		}
+		return true;
+	};
+
+	if (appendShaderWithIncludes(AppGetCurrentGraphicsShaderFileName()) == false) return false;
+	if (appendShaderWithIncludes(AppGetCurrentComputeShaderFileName()) == false) return false;
+	if (appendShaderWithIncludes(AppGetCurrentSoundShaderFileName()) == false) return false;
+
+	for (int i = 0; i < NUM_USER_TEXTURES; ++i) {
+		const char *texPath = AppUserTexturesGetCurrentFileName(i);
+		if (texPath != NULL && texPath[0] != '\0') {
+			char relative[MAX_PATH] = {0};
+			GenerateRelativePathFromDirectoryToFile(relative, sizeof(relative), projectBasePath, texPath);
+			if (appendFile(texPath, relative) == false) return false;
+		}
+	}
+
+	if (pipelineOverride != NULL) {
+		for (int passIndex = 0; passIndex < pipelineOverride->numPasses; ++passIndex) {
+			const PipelinePass &pass = pipelineOverride->passes[passIndex];
+			if (pass.shaderPath[0] == '\0' || pass.resolvedShaderPath[0] == '\0') {
+				continue;
+			}
+			if (appendFile(pass.resolvedShaderPath, pass.shaderPath) == false) {
+				return false;
+			}
+			std::string expanded;
+			std::vector<std::string> includes;
+			std::string errorMessage;
+			if (ExpandShaderIncludes(pass.resolvedShaderPath, expanded, includes, &errorMessage)) {
+				for (const std::string &inc : includes) {
+					char incRelative[MAX_PATH] = {0};
+					GenerateRelativePathFromDirectoryToFile(incRelative, sizeof(incRelative), projectBasePath, inc.c_str());
+					if (incRelative[0] == '\0') {
+						strlcpy(incRelative, inc.c_str(), sizeof(incRelative));
+					}
+					if (appendFile(inc.c_str(), incRelative) == false) return false;
+				}
+			} else if (!errorMessage.empty()) {
+				AppErrorMessageBox(APP_NAME, "Failed to expand pipeline includes: %s", errorMessage.c_str());
+				return false;
+			}
+		}
+	}
+
+	/* プロジェクト JSON をテンポラリに書き出す */
+	char tempPathName[MAX_PATH] = {0};
+	char tempProjectFile[MAX_PATH] = {0};
+	if (GetTempPathA(sizeof(tempPathName), tempPathName) == 0 ||
+		GetTempFileName(tempPathName, "mgl", 0, tempProjectFile) == 0) {
+		AppErrorMessageBox(APP_NAME, "Failed to create a temporary file.");
+		return false;
+	}
+	if (AppProjectWriteSnapshot(tempProjectFile, projectBasePath, pipelineOverride) == false) {
+		remove(tempProjectFile);
+		return false;
+	}
+
+	std::vector<PackageEntry> packageEntries;
+	{
+		size_t projectSize = 0;
+		char *projectData = MallocReadFile(tempProjectFile, &projectSize);
+		remove(tempProjectFile);
+		if (projectData == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to read project snapshot.");
+			return false;
+		}
+		PackageEntry entry;
+		entry.path = "project.json";
+		entry.data.assign(projectData, projectData + projectSize);
+		free(projectData);
+		packageEntries.push_back(std::move(entry));
+	}
+
+	for (const SourceFileEntry &file : sourceFiles) {
+		size_t size = 0;
+		char *data = MallocReadFile(file.sourcePath.c_str(), &size);
+		if (data == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to read %s.", file.sourcePath.c_str());
+			return false;
+		}
+		PackageEntry entry;
+		entry.path = file.relativePath;
+		entry.data.assign(data, data + size);
+		free(data);
+		packageEntries.push_back(std::move(entry));
+	}
+
+	/* ベース EXE をコピー */
+	size_t prevExeFileSize = GetFileSize(selfPath);
+	if (CopyFileA(selfPath, executableExportSettings->fileName, FALSE) == FALSE) {
 		AppLastErrorMessageBox(APP_NAME);
 		return false;
 	}
-#endif
-	return ret;
+
+	std::string errorMessage;
+	if (PackageAppendToFile(executableExportSettings->fileName, packageEntries, errorMessage) == false) {
+		AppErrorMessageBox(APP_NAME, "Failed to append package: %s", errorMessage.c_str());
+		return false;
+	}
+
+	size_t exeFileSize = GetFileSize(executableExportSettings->fileName);
+	int exeFileSizeDiff = (int)(exeFileSize - prevExeFileSize);
+	AppMessageBox(
+		APP_NAME,
+		"Export executable file completed successfully.\n\nFile size = %d bytes. (change %+d bytes)\n\n",
+		(int)exeFileSize,
+		exeFileSizeDiff
+	);
+	return true;
 }

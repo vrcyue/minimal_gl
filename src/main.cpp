@@ -25,6 +25,9 @@
 #include "common.h"
 #include "gl3w_work_around.h"
 #include "app.h"
+#include "package.h"
+#include <string>
+#include <vector>
 
 #include "resource/resource.h"
 #define DEFAULT_ICON_NAME	"IDI_DEFAULT"
@@ -80,6 +83,9 @@ static PIXELFORMATDESCRIPTOR s_pixelFormatDescriptor = {
 /* 全画面 or ウィンドウ切り替え */
 void ToggleFullScreen(){
 	DWORD windowStyle;
+	int desiredXReso = DEFAULT_SCREEN_XRESO;
+	int desiredYReso = DEFAULT_SCREEN_YRESO;
+	AppGetResolution(&desiredXReso, &desiredYReso);
 
 	if (s_fullScreen == false) {
 		/* windowStyle を変更 */
@@ -91,10 +97,22 @@ void ToggleFullScreen(){
 		SetMenu(AppGetMainWindowHandle(), NULL);
 
 		/* フルスクリーン化 */
-		ChangeDisplaySettings(
-			/* DEVMODEA *lpDevMode */	NULL,
-			/* DWORD    dwFlags */		CDS_FULLSCREEN
-		);
+		if (AppIsPlayerMode()) {
+			DEVMODE dm = {0};
+			dm.dmSize = sizeof(dm);
+			dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
+			dm.dmPelsWidth = desiredXReso;
+			dm.dmPelsHeight = desiredYReso;
+			LONG cdRet = ChangeDisplaySettings(&dm, CDS_FULLSCREEN);
+			if (cdRet != DISP_CHANGE_SUCCESSFUL) {
+				ChangeDisplaySettings(NULL, CDS_FULLSCREEN);
+			}
+		} else {
+			ChangeDisplaySettings(
+				/* DEVMODEA *lpDevMode */	NULL,
+				/* DWORD    dwFlags */		CDS_FULLSCREEN
+			);
+		}
 
 		/* ウィンドウサイズ変更 */
 		SetWindowPos(
@@ -126,6 +144,10 @@ void ToggleFullScreen(){
 		RECT rect = {0};
 		rect.right = DEFAULT_SCREEN_XRESO;
 		rect.bottom = DEFAULT_SCREEN_YRESO;
+		if (AppIsPlayerMode()) {
+			rect.right = desiredXReso;
+			rect.bottom = desiredYReso;
+		}
 		AdjustWindowRectEx(
 			&rect,
 			GetWindowLong(AppGetMainWindowHandle(), GWL_STYLE),
@@ -227,6 +249,10 @@ static LRESULT CALLBACK MainWndProc(
 
 		/* キーの押下を検出 */
 		case WM_KEYDOWN: {
+			if (AppIsPlayerMode() && wParam == VK_ESCAPE) {
+				PostQuitMessage(0);
+				return 0;
+			}
 		} break;
 
 		/* ファイルのドロップを検出 */
@@ -669,7 +695,7 @@ static bool WindowInitialize(
 		wndClass.hIcon			= LoadIcon(AppGetCurrentInstance(), MAKEINTRESOURCE(IDI_DEFAULT));
 		wndClass.hCursor		= LoadCursor(NULL, IDC_ARROW);
 		wndClass.hbrBackground	= (HBRUSH)GetStockObject(WHITE_BRUSH);
-		wndClass.lpszMenuName	= DEFAULT_MENU_NAME;
+		wndClass.lpszMenuName	= AppIsPlayerMode()? NULL: DEFAULT_MENU_NAME;
 		wndClass.lpszClassName	= s_wndClassName;
 		wndClass.hIconSm		= LoadIcon(AppGetCurrentInstance(), MAKEINTRESOURCE(IDI_SMALL));
 		if (wndClass.hIcon == 0) {
@@ -689,30 +715,13 @@ static bool WindowInitialize(
 	/* ウィンドウ作成 */
 	{
 		DWORD windowExStyle = 0;
-		DWORD windowStyle = (
-			WS_BORDER * 0
-		|	WS_CAPTION * 0
-		|	WS_CHILD * 0
-		|	WS_CLIPCHILDREN * 0
-		|	WS_CLIPSIBLINGS * 0
-		|	WS_DISABLED * 0
-		|	WS_DLGFRAME * 0
-		|	WS_GROUP * 0
-		|	WS_HSCROLL * 0
-		|	WS_MAXIMIZE * 0
-		|	WS_MAXIMIZEBOX * 0
-		|	WS_MINIMIZE * 0
-		|	WS_MINIMIZEBOX * 0
-		|	WS_OVERLAPPED * 0
-		|	WS_OVERLAPPEDWINDOW * 1
-		|	WS_POPUP * 0
-		|	WS_POPUPWINDOW * 0
-		|	WS_SYSMENU * 0
-		|	WS_TABSTOP * 0
-		|	WS_THICKFRAME * 0
-		|	WS_VISIBLE * 1
-		|	WS_VSCROLL * 0
-		);
+		DWORD windowStyle = 0;
+		if (AppIsPlayerMode()) {
+			windowStyle = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+		} else {
+			/* エディタはリサイズ不可にして描画解像度を固定 */
+			windowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE;
+		}
 
 		RECT rect = {0};
 		rect.right = DEFAULT_SCREEN_XRESO;
@@ -720,7 +729,7 @@ static bool WindowInitialize(
 		AdjustWindowRectEx(
 			&rect,
 			windowStyle,
-			TRUE,		/* メニューを持つか？ */
+			AppIsPlayerMode()? FALSE: TRUE,		/* メニューを持つか？ */
 			windowExStyle
 		);
 
@@ -748,7 +757,7 @@ static bool WindowInitialize(
 	}
 
 	/* アクセラレータテーブルをロード */
-	s_hAccel = LoadAccelerators(AppGetCurrentInstance(), DEFAULT_MENU_NAME);
+	s_hAccel = AppIsPlayerMode()? 0: LoadAccelerators(AppGetCurrentInstance(), DEFAULT_MENU_NAME);
 
 	/* デバイスコンテキストのハンドルを取得 */
 	s_hDC = GetDC(AppGetMainWindowHandle());
@@ -810,21 +819,6 @@ int WINAPI WinMain(
 	/* 現在のアプリケーションインスタンスのハンドルを設定 */
 	AppSetCurrentInstance(hCurrentInstance);
 
-	/* TTY 出力確認用に dos 窓を開く */
-	if (1) {
-		COORD coord;
-		coord.X = 80;
-		coord.Y = 4095;
-		AllocConsole();
-		SetConsoleScreenBufferSize(
-			GetStdHandle(STD_OUTPUT_HANDLE),
-			coord
-		);
-		freopen("conin$", "r", stdin);
-		freopen("conout$", "w", stdout);
-		freopen("conout$", "w", stderr);
-	}
-
 	/* コマンドライン文字列のコピーを作成 */
 	size_t cmdLineLength = strlen(lpCmdLine) + 1 /* 末端 \0 分 */;
 	char *cmdLineCopy = (char *)malloc(cmdLineLength);
@@ -835,17 +829,17 @@ int WINAPI WinMain(
 	#define ARGC_MAX	(256)
 	char *(argv[ARGC_MAX]) = {0};
 	int argc = 1;
+	char selfPath[MAX_PATH] = {0};
 	{
 		/* 実行ファイル名をフルパスで取得 */
-		static char s_appFullPathFileName[MAX_PATH] = {0};
 		GetModuleFileName(
 			/* HMODULE hModule    モジュールのハンドル */	NULL,
-			/* LPTSTR lpFileName  モジュールのファイル名 */	s_appFullPathFileName,
-			/* DWORD nSize        バッファのサイズ */		sizeof(s_appFullPathFileName)
+			/* LPTSTR lpFileName  モジュールのファイル名 */	selfPath,
+			/* DWORD nSize        バッファのサイズ */		sizeof(selfPath)
 		);
 
 		/* コマンドライン引数のパース */
-		argv[0] = s_appFullPathFileName;
+		argv[0] = selfPath;
 		{
 			bool inQuote = false;
 			bool isBlank = true;
@@ -889,6 +883,82 @@ int WINAPI WinMain(
 		}
 	}
 
+	bool forceEditor = false;
+	bool forcePlayer = false;
+	char workDirArg[MAX_PATH] = {0};
+	std::vector<std::string> positionalArgs;
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--editor") == 0) {
+			forceEditor = true;
+		} else if (strcmp(argv[i], "--player") == 0) {
+			forcePlayer = true;
+		} else if (strcmp(argv[i], "--workdir") == 0 && i + 1 < argc) {
+			strlcpy(workDirArg, argv[i + 1], sizeof(workDirArg));
+			++i;
+		} else {
+			positionalArgs.emplace_back(argv[i]);
+		}
+	}
+
+	bool packageAvailable = PackageExists(selfPath);
+	bool playerMode = false;
+	if (forceEditor == false) {
+		playerMode = forcePlayer || packageAvailable;
+	}
+	if (playerMode && packageAvailable == false) {
+		AppErrorMessageBox(APP_NAME, "Package not found in the executable.");
+		playerMode = false;
+	}
+
+	char extractDirectory[MAX_PATH] = {0};
+	if (playerMode) {
+		if (workDirArg[0] != '\0') {
+			strlcpy(extractDirectory, workDirArg, sizeof(extractDirectory));
+			int dirRet = SHCreateDirectoryExA(NULL, extractDirectory, NULL);
+			if (dirRet != ERROR_SUCCESS && dirRet != ERROR_ALREADY_EXISTS) {
+				AppErrorMessageBox(APP_NAME, "Failed to create workdir %s.", extractDirectory);
+				playerMode = false;
+			}
+		} else {
+			char tempPath[MAX_PATH] = {0};
+			if (GetTempPathA(sizeof(tempPath), tempPath) == 0
+			||	GetTempFileName(tempPath, "mgl", 0, extractDirectory) == 0
+			) {
+				AppErrorMessageBox(APP_NAME, "Failed to allocate a temp directory.");
+				playerMode = false;
+			} else {
+				DeleteFile(extractDirectory);
+				if (CreateDirectoryA(extractDirectory, NULL) == FALSE && GetLastError() != ERROR_ALREADY_EXISTS) {
+					AppLastErrorMessageBox(APP_NAME);
+					playerMode = false;
+				}
+			}
+		}
+		if (playerMode) {
+			std::string errorMessage;
+			if (PackageExtractToDirectory(selfPath, extractDirectory, errorMessage) == false) {
+				AppErrorMessageBox(APP_NAME, "Failed to extract package: %s", errorMessage.c_str());
+				playerMode = false;
+			}
+		}
+	}
+	AppSetPlayerMode(playerMode);
+
+	/* TTY 出力確認用に dos 窓を開く（エディターモードのみ） */
+	if (!AppIsPlayerMode()) {
+		COORD coord;
+		coord.X = 80;
+		coord.Y = 4095;
+		AllocConsole();
+		SetConsoleScreenBufferSize(
+			GetStdHandle(STD_OUTPUT_HANDLE),
+			coord
+		);
+		freopen("conin$", "r", stdin);
+		freopen("conout$", "w", stdout);
+		freopen("conout$", "w", stderr);
+	}
+
 	/* ウィンドウ初期化 */
 	if (WindowInitialize() == false) {
 		AppErrorMessageBox(APP_NAME, "WindowInitialize() failed.");
@@ -901,13 +971,31 @@ int WINAPI WinMain(
 		return 0;
 	}
 
+	if (AppIsPlayerMode() && s_fullScreen == false) {
+		ToggleFullScreen();
+	}
+
+	if (AppIsPlayerMode()) {
+		if (extractDirectory[0] != '\0') {
+			SetCurrentDirectory(extractDirectory);
+		}
+		char projectPath[MAX_PATH] = {0};
+		GenerateCombinedPath(projectPath, sizeof(projectPath), extractDirectory, "project.json");
+		if (IsValidFileName(projectPath) == false || AppProjectImport(projectPath) == false) {
+			AppErrorMessageBox(APP_NAME, "Failed to load packaged project.");
+			return 0;
+		}
+	} else if (!positionalArgs.empty()) {
+		AppOpenDragAndDroppedFile(positionalArgs[0].c_str());
+	}
+
 	/* メインループ */
 	HWND hWnd = AppGetMainWindowHandle();
 	while (!done) {
 		/* メッセージ監視 */
 		while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
 			if (msg.message == WM_QUIT) done = 1;
-			if (!TranslateAccelerator(hWnd, s_hAccel, &msg)) {
+			if (s_hAccel == 0 || !TranslateAccelerator(hWnd, s_hAccel, &msg)) {
 				TranslateMessage(&msg);
 				DispatchMessage(&msg);
 			}
@@ -926,17 +1014,21 @@ int WINAPI WinMain(
 
 		/* メニューのチェック状態を更新 */
 		{
-			HMENU hMenu = GetMenu(AppGetMainWindowHandle());
-			SetMenuItemCheck(
-				hMenu,
-				IDM_TOGGLE_DISPLAY_CURRENT_STATUS,
-				AppImGuiGetDisplayCurrentStatusFlag()
-			);
-			SetMenuItemCheck(
-				hMenu,
-				IDM_TOGGLE_DISPLAY_CAMERA_SETTINGS,
-				AppImGuiGetDisplayCameraSettingsFlag()
-			);
+			if (!AppIsPlayerMode()) {
+				HMENU hMenu = GetMenu(AppGetMainWindowHandle());
+				if (hMenu != NULL) {
+					SetMenuItemCheck(
+						hMenu,
+						IDM_TOGGLE_DISPLAY_CURRENT_STATUS,
+						AppImGuiGetDisplayCurrentStatusFlag()
+					);
+					SetMenuItemCheck(
+						hMenu,
+						IDM_TOGGLE_DISPLAY_CAMERA_SETTINGS,
+						AppImGuiGetDisplayCameraSettingsFlag()
+					);
+				}
+			}
 		}
 
 		/* アプリケーション解像度取得 */

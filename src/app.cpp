@@ -42,6 +42,7 @@ static bool s_paused = false;
 static double s_fp64PausedTime = 0;
 static int s_xReso = DEFAULT_SCREEN_XRESO;
 static int s_yReso = DEFAULT_SCREEN_YRESO;
+static bool s_playerMode = false;
 static int32_t s_waveOutSampleOffset = 0;
 static int32_t s_frameCount = 0;
 static struct ImGuiStatus {
@@ -1563,7 +1564,11 @@ static bool AppProjectDeserializeFromJson(cJSON *jsonRoot, const char *projectBa
 	return result;
 }
 
-static void AppProjectSerializeToJson(cJSON *jsonRoot, const char *projectBasePath){
+static void AppProjectSerializeToJson(
+	cJSON *jsonRoot,
+	const char *projectBasePath,
+	const PipelineDescription *pipelineOverride
+){
 	{
 		cJSON *jsonApp = cJSON_AddObjectToObject(jsonRoot, "app");
 
@@ -1662,8 +1667,12 @@ static void AppProjectSerializeToJson(cJSON *jsonRoot, const char *projectBasePa
 		cJSON_AddBoolToObject  (jsonSettings, "enableSwapIntervalControl",  s_renderSettings.enableSwapIntervalControl);
 		cJSON_AddNumberToObject(jsonSettings, "swapInterval",               s_renderSettings.swapInterval);
 	}
-	if (s_pipelineDescriptionIsValid) {
-		cJSON *jsonPipeline = PipelineDescriptionSerializeToJson(&s_pipelineDescriptionForProject);
+	const PipelineDescription *pipelineForJson = pipelineOverride;
+	if (pipelineForJson == NULL && s_pipelineDescriptionIsValid) {
+		pipelineForJson = &s_pipelineDescriptionForProject;
+	}
+	if (pipelineForJson != NULL) {
+		cJSON *jsonPipeline = PipelineDescriptionSerializeToJson(pipelineForJson);
 		if (jsonPipeline != NULL) {
 			cJSON_AddItemToObject(jsonRoot, "pipeline", jsonPipeline);
 		}
@@ -1836,7 +1845,7 @@ bool AppProjectExport(const char *fileName){
 
 	/* プロジェクトをメモリ上にシリアライズ */
 	cJSON *jsonRoot = cJSON_CreateObject();
-	AppProjectSerializeToJson(jsonRoot, projectBasePath);
+	AppProjectSerializeToJson(jsonRoot, projectBasePath, NULL);
 
 	/* ファイルに保存 */
 	bool result;
@@ -1874,7 +1883,7 @@ bool AppProjectAutoExport(bool confirm){
 
 	/* プロジェクトをメモリ上にシリアライズ */
 	cJSON *jsonRoot = cJSON_CreateObject();
-	AppProjectSerializeToJson(jsonRoot, projectBasePath);
+	AppProjectSerializeToJson(jsonRoot, projectBasePath, NULL);
 
 	/* シリアライズ結果が既存のプロジェクトファイルと一致するならキャンセル */
 	{
@@ -1918,6 +1927,80 @@ bool AppProjectAutoExport(bool confirm){
 	/* リソース解放して終了 */
 	cJSON_Delete(jsonRoot);
 	return result;
+}
+
+bool AppProjectWriteSnapshot(
+	const char *fileName,
+	const char *projectBasePath,
+	const PipelineDescription *pipelineOverride
+){
+	if (fileName == NULL || fileName[0] == '\0') {
+		return false;
+	}
+
+	char basePath[MAX_PATH] = {0};
+	if (projectBasePath != NULL && projectBasePath[0] != '\0') {
+		strlcpy(basePath, projectBasePath, sizeof(basePath));
+	} else if (AppProjectGetCurrentFileName() != NULL && AppProjectGetCurrentFileName()[0] != '\0') {
+		SplitDirectoryPathFromFilePath(basePath, sizeof(basePath), AppProjectGetCurrentFileName());
+	}
+
+	cJSON *jsonRoot = cJSON_CreateObject();
+	AppProjectSerializeToJson(jsonRoot, basePath, pipelineOverride);
+
+	bool result = true;
+	FILE *file = fopen(fileName, "wb");
+	if (file == NULL) {
+		AppErrorMessageBox(APP_NAME, "Failed to write snapshot %s.", fileName);
+		result = false;
+	} else {
+		char *text = cJSON_Print(jsonRoot);
+		if (text == NULL) {
+			AppErrorMessageBox(APP_NAME, "Failed to serialize project to JSON.");
+			result = false;
+		} else {
+			fputs(text, file);
+			free(text);
+		}
+		fclose(file);
+	}
+
+	cJSON_Delete(jsonRoot);
+	return result;
+}
+
+bool AppPipelineBuildPackagedCopy(
+	PipelineDescription *dst,
+	const char *projectBasePath
+){
+	if (dst == NULL) return false;
+	const PipelineDescription *src = AppPipelineGetProjectDescription();
+	if (src == NULL) return false;
+
+	*dst = *src;
+	if (projectBasePath == NULL || projectBasePath[0] == '\0') {
+		return true;
+	}
+
+	for (int passIndex = 0; passIndex < dst->numPasses; ++passIndex) {
+		PipelinePass *passDst = &dst->passes[passIndex];
+		const PipelinePass *passSrc = &src->passes[passIndex];
+		if (passSrc->resolvedShaderPath[0] == '\0') {
+			continue;
+		}
+
+		char relativePath[MAX_PATH] = {0};
+		GenerateRelativePathFromDirectoryToFile(
+			relativePath,
+			sizeof(relativePath),
+			projectBasePath,
+			passSrc->resolvedShaderPath
+		);
+		strlcpy(passDst->shaderPath, relativePath, sizeof(passDst->shaderPath));
+		strlcpy(passDst->resolvedShaderPath, passSrc->resolvedShaderPath, sizeof(passDst->resolvedShaderPath));
+	}
+
+	return true;
 }
 
 /*=============================================================================
@@ -2669,6 +2752,13 @@ void AppResume(){
 	}
 }
 
+void AppSetPlayerMode(bool flag){
+	s_playerMode = flag;
+}
+bool AppIsPlayerMode(){
+	return s_playerMode;
+}
+
 static void AppSeekInSamples(int samples){
 	s_waveOutSampleOffset = SoundGetWaveOutPos() + samples;
 	if (s_waveOutSampleOffset < 0) s_waveOutSampleOffset = 0;
@@ -2739,7 +2829,7 @@ bool AppUpdate(){
 		}
 
 		/* ステートを ImGui で表示 */
-		if (s_imGuiStatus.displayCurrentStatus) {
+		if (!AppIsPlayerMode() && s_imGuiStatus.displayCurrentStatus) {
 			ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoSavedSettings;
 			ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_FirstUseEver);
 			if (ImGui::Begin("Current Status", NULL, window_flags)) {
@@ -2760,7 +2850,7 @@ bool AppUpdate(){
 	}
 
 	/* カメラコントロールを要求するシェーダでは、カメラの設定を ImGui で表示 */
-	if (GraphicsShaderRequiresCameraControlUniforms()) {
+	if (!AppIsPlayerMode() && GraphicsShaderRequiresCameraControlUniforms()) {
 		if (s_imGuiStatus.displayCameraSettings) {
 			ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoSavedSettings;
 			ImGui::SetNextWindowPos(ImVec2(200, 0), ImGuiCond_FirstUseEver);
@@ -2944,6 +3034,10 @@ bool AppInitialize(int argc, char **argv){
 	memset(&s_graphicsShaderFileStat, 0, sizeof(s_graphicsShaderFileStat));
 	memset(&s_computeShaderFileStat, 0, sizeof(s_computeShaderFileStat));
 	memset(&s_soundShaderFileStat, 0, sizeof(s_soundShaderFileStat));
+	if (AppIsPlayerMode()) {
+		s_imGuiStatus.displayCurrentStatus = false;
+		s_imGuiStatus.displayCameraSettings = false;
+	}
 
 	if (HighPrecisionTimerInitialize() == false) {
 		AppErrorMessageBox(APP_NAME, "HighPrecisionTimerInitialize() failed.");
