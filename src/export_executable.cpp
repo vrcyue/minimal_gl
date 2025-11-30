@@ -299,6 +299,55 @@ PipelinePresentChannelEnumName(PipelinePresentChannel channel){
 }
 
 static bool
+WriteShaderCStringInl(
+	const char *srcPath,
+	const char *dstPath
+){
+	char *fileImage = MallocReadTextFile(srcPath);
+	if (fileImage == NULL) {
+		AppErrorMessageBox(APP_NAME, "Failed to open %s.", srcPath);
+		return false;
+	}
+
+	FILE *file = fopen(dstPath, "wt");
+	if (file == NULL) {
+		AppErrorMessageBox(APP_NAME, "Failed to open %s.", dstPath);
+		free(fileImage);
+		return false;
+	}
+
+	/*
+		プレイヤー側では文字列リテラルとしてインクルードされるので、
+		エスケープして複数行の文字列リテラルを生成する。
+	*/
+	fputc('"', file);
+	for (const char *p = fileImage; *p != '\0'; ++p) {
+		unsigned char c = (unsigned char)*p;
+		switch (c) {
+			case '\\': fputs("\\\\", file); break;
+			case '\"': fputs("\\\"", file); break;
+			case '\r': {
+				/* CRLF の CR はスキップ */
+			} break;
+			case '\n': {
+				fputs("\\n\"\n\"", file);
+			} break;
+			case '\t': {
+				fputs("\\t", file);
+			} break;
+			default: {
+				fputc(c, file);
+			} break;
+		}
+	}
+	fputs("\"\n", file);
+
+	fclose(file);
+	free(fileImage);
+	return true;
+}
+
+static bool
 WritePipelineDescriptionInl(
 	const PipelineDescription *pipeline,
 	const char *fileName
@@ -619,10 +668,13 @@ bool ExportExecutableSub(
 	const char *resourceCppFullPath,
 	const char *resourceObjFullPath,
 	const char *graphicsFragmentShaderGlslFullPath,
+	const char *graphicsFragmentShaderTmpFullPath,
 	const char *graphicsFragmentShaderInlFullPath,
 	const char *graphicsComputeShaderGlslFullPath,
+	const char *graphicsComputeShaderTmpFullPath,
 	const char *graphicsComputeShaderInlFullPath,
 	const char *soundComputeShaderGlslFullPath,
+	const char *soundComputeShaderTmpFullPath,
 	const char *soundComputeShaderInlFullPath,
 	const char *pipelineDescriptionInlFullPath,
 	const char *crinklerReportFullPath,
@@ -661,14 +713,7 @@ bool ExportExecutableSub(
 		実行ファイルのディレクトリに shader_minifier.exe が存在するならそのパスを、
 		存在しないならパスの通ったディレクトリの shader_minifier.exe を選択。
 	*/
-	char shaderMinifierPath[MAX_PATH] = {0};
-	snprintf(shaderMinifierPath, sizeof(shaderMinifierPath), "%s%s", selfDir, "shader_minifier.exe");
-	bool enableWhereShaderMinifier = false;
-	if (IsValidFileName(shaderMinifierPath) == false) {
-		enableWhereShaderMinifier = true;
-		strcpy_s(shaderMinifierPath, sizeof(shaderMinifierPath), "shader_minifier.exe");
-	}
-	printf("shaderMinifierPath = %s\n", shaderMinifierPath);
+	/* shader_minifier.exe は使用しない */
 
 	/* main.asm/main.cpp 生成 */
 #if USE_MAIN_CPP
@@ -803,46 +848,6 @@ bool ExportExecutableSub(
 
 	/* minify.bat 生成 */
 	{
-		char shaderMinifierOptions[0x100] = {0};
-		{
-			/*
-				コマンドライン引数 --no-renaming-list のパラメータのエラーチェックは、
-				ダイアログボックスから読み取る時点で行われている。
-				ここではパラメータは妥当なものとして扱う。
-			*/
-			bool enableFieldNames     = executableExportSettings->shaderMinifierOptions.enableFieldNames;
-			bool enableNoRenamingList = executableExportSettings->shaderMinifierOptions.enableNoRenamingList;
-			static const char *s_fieldNames[] = {"rgba", "xyzw", "stpq"};
-			snprintf(
-				shaderMinifierOptions,
-				sizeof(shaderMinifierOptions),
-				"%s%s%s"	/* for --field-names */
-				"%s"		/* for --no-renaming */
-				"%s%s%s"	/* for --no-renaming-list */
-				"%s"		/* for --no-sequence */
-				"%s"		/* for --smoothstep */
-				,
-				/* --field-names */
-				(enableFieldNames? "--field-names ": ""),
-				(enableFieldNames? s_fieldNames[executableExportSettings->shaderMinifierOptions.fieldNameIndex]: ""),
-				(enableFieldNames? " ": ""),
-
-				/* --no-renaming */
-				(executableExportSettings->shaderMinifierOptions.noRenaming? "--no-renaming ": ""),
-
-				/* --no-renaming-list */
-				(enableNoRenamingList? "--no-renaming-list ": ""),
-				(enableNoRenamingList? executableExportSettings->shaderMinifierOptions.noRenamingList: ""),
-				(enableNoRenamingList? " ": ""),
-
-				/* --no-sequence */
-				(executableExportSettings->shaderMinifierOptions.noSequence? "--no-sequence ": ""),
-
-				/* --smoothstep */
-				(executableExportSettings->shaderMinifierOptions.smoothstep? "--smoothstep ": "")
-			);
-		}
-
 		printf("generate %s.\n", minifyBatFullPath);
 		FILE *file = fopen(minifyBatFullPath, "wt");
 		if (file == NULL) {
@@ -901,31 +906,6 @@ bool ExportExecutableSub(
 				soundComputeShaderVersionDirectiveBuffer								/* arg 3 */
 			);
 
-			/* shader_minifier.exe の存在チェック */
-			fprintf(
-				file,
-				"%swhere shader_minifier.exe || exit /b 5\n"							/* arg 1 = enableWhereShaderMinifier? "" : "rem " */
-				,
-				enableWhereShaderMinifier? "" : "rem "									/* arg 1 */
-			);
-
-			/*
-				shader_minifier を実行
-				graphics_fragment_shader.i -> graphics_fragment_shader.inl
-				graphics_compute_shader.i -> graphics_compute_shader.inl
-				sound_compute_shader.i -> sound_compute_shader.inl
-			*/
-			fprintf(
-				file,
-				"\"%s\" %s graphics_fragment_shader.i -o graphics_fragment_shader.inl --format c-array || exit /b 6\n"		/* arg 1,2 = shader_minifier.exe のパスと引数 */
-				"\"%s\" %s graphics_compute_shader.i -o graphics_compute_shader.inl --format c-array || exit /b 7\n"		/* arg 3,4 = shader_minifier.exe のパスと引数 */
-				"\"%s\" %s sound_compute_shader.i -o sound_compute_shader.inl --format c-array || exit /b 8\n"				/* arg 5,6 = shader_minifier.exe のパスと引数 */
-				,
-				shaderMinifierPath, shaderMinifierOptions,								/* arg 1,2 */
-				shaderMinifierPath, shaderMinifierOptions,								/* arg 3,4 */
-				shaderMinifierPath, shaderMinifierOptions								/* arg 5,6 */
-			);
-
 			fclose(file);
 		}
 	}
@@ -947,26 +927,6 @@ bool ExportExecutableSub(
 				case 4: {
 					AppErrorMessageBox(APP_NAME, "Failed to pre-process sound compute shader.");
 				} break;
-				case 5: {
-					AppErrorMessageBox(
-						APP_NAME,
-						"Failed to execute shader_minifier.exe.\n"
-						"\n"
-						"Please install shader_minifier.exe to the directory where the minimal_gl.exe is installed, "
-						"or edit your PATH to include the installed directory of the shader_minifier.exe.\n"
-						"\n"
-						"https://github.com/laurentlb/Shader_Minifier"
-					);
-				} break;
-				case 6: {
-					AppErrorMessageBox(APP_NAME, "Failed to minify graphics fragment shader.");
-				} break;
-				case 7: {
-					AppErrorMessageBox(APP_NAME, "Failed to minify graphics compute shader.");
-				} break;
-				case 8: {
-					AppErrorMessageBox(APP_NAME, "Failed to minify sound compute shader.");
-				} break;
 				default: {
 					assert(false);
 				} break;
@@ -975,14 +935,14 @@ bool ExportExecutableSub(
 		}
 	}
 
-	/* 末端カンマの除去	*/
-	if (RemoveComma(graphicsFragmentShaderInlFullPath) == false) {
+	/* shader_minifier を使わないので .i -> .inl を自前で生成 */
+	if (WriteShaderCStringInl(graphicsFragmentShaderTmpFullPath, graphicsFragmentShaderInlFullPath) == false) {
 		return false;
-	};
-	if (RemoveComma(graphicsComputeShaderInlFullPath) == false) {
+	}
+	if (WriteShaderCStringInl(graphicsComputeShaderTmpFullPath, graphicsComputeShaderInlFullPath) == false) {
 		return false;
-	};
-	if (RemoveComma(soundComputeShaderInlFullPath) == false) {
+	}
+	if (WriteShaderCStringInl(soundComputeShaderTmpFullPath, soundComputeShaderInlFullPath) == false) {
 		return false;
 	}
 
@@ -1451,10 +1411,13 @@ bool ExportExecutable(
 		resourceCppFullPath,
 		resourceObjFullPath,
 		graphicsFragmentShaderGlslFullPath,
+		graphicsFragmentShaderTmpFullPath,
 		graphicsFragmentShaderInlFullPath,
 		graphicsComputeShaderGlslFullPath,
+		graphicsComputeShaderTmpFullPath,
 		graphicsComputeShaderInlFullPath,
 		soundComputeShaderGlslFullPath,
+		soundComputeShaderTmpFullPath,
 		soundComputeShaderInlFullPath,
 		pipelineDescriptionInlFullPath,
 		crinklerReportFullPath,
