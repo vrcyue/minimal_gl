@@ -176,6 +176,7 @@
     <ClCompile Include="src\GL\gl3w.c" />
     <ClCompile Include="src\graphics.cpp" />
     <ClCompile Include="src\high_precision_timer.cpp" />
+    <ClCompile Include="src\package.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\pixel_format.cpp" />
     <ClCompile Include="src\pipeline_description.cpp" />

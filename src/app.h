@@ -3,6 +3,7 @@
 
 #include "graphics.h"
 #include "export_executable.h"
+#include "pipeline_description.h"
 
 
 #ifndef _APP_H_
@@ -429,6 +430,19 @@ bool AppProjectExport(const char *fileName);
 /* プロジェクト管理 : 自動エクスポート */
 bool AppProjectAutoExport(bool confirm);
 
+/* プロジェクト管理 : スナップショットを任意パスに出力（状態は変更しない） */
+bool AppProjectWriteSnapshot(
+	const char *fileName,
+	const char *projectBasePath,
+	const PipelineDescription *pipelineOverride
+);
+
+/* パイプライン : パッケージ用にパスを解決したコピーを生成 */
+bool AppPipelineBuildPackagedCopy(
+	PipelineDescription *dst,
+	const char *projectBasePath
+);
+
 
 /* 強制上書きフラグを設定 */
 void AppSetForceOverWriteFlag(bool flag);
@@ -496,6 +510,10 @@ void AppPause();
 
 /* 再開 */
 void AppResume();
+
+/* プレイヤーモードの設定／取得 */
+void AppSetPlayerMode(bool flag);
+bool AppIsPlayerMode();
 
 /* スロー送り */
 void AppSlowForward();
